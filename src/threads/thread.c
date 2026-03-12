@@ -29,6 +29,9 @@ static struct list ready_list;
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
 
+/* Lista de todos os processos bloqueados */
+static struct list blocked_list;
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -54,6 +57,8 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 /* Scheduling. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
+
+static int64_t ticks = 0;       /* Number of timer ticks since OS booted. */
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -93,6 +98,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&blocked_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -123,6 +129,7 @@ thread_start (void)
 void
 thread_tick (void) 
 {
+  ticks++;
   struct thread *t = thread_current ();
 
   /* Update statistics. */
@@ -215,10 +222,15 @@ void
 thread_block (void) 
 {
   ASSERT (!intr_context ());
-  ASSERT (intr_get_level () == INTR_OFF);
+  
+  struct thread *cur = thread_current();
+  
+  /* Se tick_to_wake_up estiver configurado, bloqueia até o tick desejado. */
+  if (cur->tick_to_wake_up > 0 && cur != idle_thread)
+      list_push_back (&blocked_list, &cur->elem);
 
-  thread_current ()->status = THREAD_BLOCKED;
-  schedule ();
+  cur->status = THREAD_BLOCKED;
+  schedule();
 }
 
 /* Transitions a blocked thread T to the ready-to-run state.
@@ -491,10 +503,29 @@ alloc_frame (struct thread *t, size_t size)
 static struct thread *
 next_thread_to_run (void) 
 {
-  if (list_empty (&ready_list))
+  for (struct list_elem *e = list_begin (&blocked_list); e != list_end (&blocked_list); e = list_next (e))
+  {
+        struct thread *t = list_entry (e, struct thread, elem);
+
+        /* Verificando se ja se passou o tick determinado a partir do qual a thread poderia acordar */
+        if (ticks >= t->tick_to_wake_up)
+        {
+            /* Removendo da fila de threads dormindo */
+            e = list_remove(e); // e = e->next; e recebe o proximo elemento depois do elemento removido
+            e = list_prev(e);   // e = e->prev; e recebe o elemento anterior do elemento removido
+
+            ASSERT (t->status == THREAD_BLOCKED);
+           
+            /* Colocando de volta no final da fila de pronto */
+            list_push_back (&ready_list, &t->elem);
+            t->status = THREAD_READY;
+        }
+    }
+
+    if (!list_empty (&ready_list))
+      return list_entry (list_pop_front (&ready_list), struct thread, elem);
+
     return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
 }
 
 /* Completes a thread switch by activating the new thread's page
