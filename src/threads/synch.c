@@ -139,13 +139,29 @@ sema_up (struct semaphore *sema)
 
   if (!list_empty (&sema->waiters)) 
     {
-      list_sort (&sema->waiters, thread_priority_more, NULL);
       thread_unblock (list_entry (list_pop_front (&sema->waiters),
                                   struct thread, elem));
     }
 
   sema->value++;
   intr_set_level (old_level);
+}
+
+/* One semaphore in a list. */
+struct semaphore_elem 
+  {
+    struct list_elem elem;              /* Element. */
+    struct semaphore semaphore;         /* Semaphore. */
+    int priority;                       /* Prioridade da waiting thread. */
+  };
+
+// Comparador de struct semaphore_elem por prioridade da waiting thread
+static bool
+sema_elem_priority_more(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  const struct semaphore_elem *sa = list_entry(a, struct semaphore_elem, elem);
+  const struct semaphore_elem *sb = list_entry(b, struct semaphore_elem, elem);
+  return sa->priority > sb->priority;
 }
 // ------------------------------------------------------------------------------------------------ // 
 
@@ -366,12 +382,6 @@ lock_held_by_current_thread (const struct lock *lock)
   return lock->holder == thread_current ();
 }
 
-/* One semaphore in a list. */
-struct semaphore_elem 
-  {
-    struct list_elem elem;              /* List element. */
-    struct semaphore semaphore;         /* This semaphore. */
-  };
 
 /* Initializes condition variable COND.  A condition variable
    allows one piece of code to signal a condition and cooperating
@@ -413,9 +423,11 @@ cond_wait (struct condition *cond, struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (lock_held_by_current_thread (lock));
-  
+
   sema_init (&waiter.semaphore, 0);
-  list_push_back (&cond->waiters, &waiter.elem);
+  waiter.priority = thread_current()->priority;
+  list_insert_ordered (&cond->waiters, &waiter.elem, sema_elem_priority_more, NULL);
+  
   lock_release (lock);
   sema_down (&waiter.semaphore);
   lock_acquire (lock);
