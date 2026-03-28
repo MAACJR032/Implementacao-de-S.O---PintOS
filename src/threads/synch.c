@@ -145,6 +145,9 @@ sema_up (struct semaphore *sema)
 
   sema->value++;
   intr_set_level (old_level);
+
+  /*Se houver thread mais prioritária, ceder CPU */
+  thread_yield_cond();
 }
 
 /* One semaphore in a list. */
@@ -264,6 +267,7 @@ lock_acquire (struct lock *lock)
 
   if (lock->holder != NULL)
     {
+      enum intr_level old_level = intr_disable ();
       cur->waiting_lock = lock;
       
       //Adiciona a thread atual a lista de doações do dono do lock
@@ -289,12 +293,17 @@ lock_acquire (struct lock *lock)
           
           depth++;
         }
+
+      intr_set_level (old_level);
     }
 
   sema_down (&lock->semaphore);
 
+  enum intr_level old_level = intr_disable ();
   cur->waiting_lock = NULL;
   lock->holder = cur;
+
+  intr_set_level (old_level);
 }
 // ------------------------------------------------------------------------------------------------ // 
 
@@ -344,6 +353,8 @@ lock_release (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  enum intr_level old_level = intr_disable ();
+
   struct thread *cur = thread_current();
 
   //Removendo da lista de doação todas as threads que esperavam este lock
@@ -356,6 +367,8 @@ lock_release (struct lock *lock)
     else
       e = list_next(e);
   }
+
+  intr_set_level (old_level);
 
   //Recalcular a prioridade efetiva
   thread_update(cur);
