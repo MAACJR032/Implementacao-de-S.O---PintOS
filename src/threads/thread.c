@@ -209,9 +209,7 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 /* PRIORITY PREEMPTION ---------------------- MODIFICAÇÃO ---------------------- */ 
-  if (t->priority > thread_current()->priority) {
-      thread_yield();
-  }
+  thread_yield_cond();
 
   return tid;
 }
@@ -409,18 +407,40 @@ void
 thread_set_priority (int new_priority) 
 {
   struct thread *cur = thread_current ();
-  cur->priority = new_priority;
+  cur->original_priority = new_priority;
+
+  thread_update(cur);
 
   /*Se houver thread mais prioritária, ceder CPU */
-  if (!list_empty(&ready_list)) {
-    struct thread *highest = list_entry(list_front(&ready_list), struct thread, elem);
+  thread_yield_cond();
+}
 
-    if (highest->priority > cur->priority) {
-      thread_yield();
+// ------------------------------------------------------------------------------------------------ // 
+//Função para atualizar o valor que recalcula a prioridade "variável"
+void thread_update(struct thread *t){
+  t->priority = t->original_priority;
+
+  if(!list_empty(&t->donations)){
+    struct thread *highest_giver = list_entry(list_front(&t->donations),struct thread,donation_elem);
+
+    if(highest_giver->priority > t->priority){
+      t->priority = highest_giver->priority;
     }
   }
 }
-// ------------------------------------------------------------------------------------------------ // 
+
+//Função para ver se tem um thread mais prioritária que a atual
+void thread_yield_cond(void){
+  if(!list_empty(&ready_list)){
+    
+    struct thread *highest_ready = list_entry(list_begin(&ready_list),struct thread,elem);
+
+    if(thread_current()->priority < highest_ready->priority){
+      thread_yield();
+    }
+
+  }
+}
 
 /* Returns the current thread's priority. */
 int
@@ -591,7 +611,7 @@ next_thread_to_run (void)
             ASSERT (t->status == THREAD_BLOCKED);
            
             /* Colocando de volta no final da fila de pronto */
-            list_push_back (&ready_list, &t->elem);
+            list_insert_ordered (&ready_list, &t->elem, thread_priority_more, NULL);
             t->status = THREAD_READY;
         }
     }

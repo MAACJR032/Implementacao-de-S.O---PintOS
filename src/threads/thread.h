@@ -141,6 +141,8 @@ void thread_foreach (thread_action_func *, void *);
 int thread_get_priority (void);
 void thread_set_priority (int);
 bool thread_priority_more (const struct list_elem *a, const struct list_elem *b, void *aux);
+void thread_update(struct thread *t);
+void thread_yield_cond(void);
 
 int thread_get_nice (void);
 void thread_set_nice (int);

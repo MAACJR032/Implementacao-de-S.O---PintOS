@@ -238,33 +238,46 @@ lock_acquire (struct lock *lock)
 {
   struct thread *cur = thread_current ();
   struct thread *holder;
+
   int depth = 0;
 
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+
   if (lock->holder != NULL)
     {
-      cur->waiting_on_lock = lock;
+      cur->waiting_lock = lock;
+      
+      //Adiciona a thread atual a lista de doações do dono do lock
+      list_insert_ordered(&lock->holder->donations,&cur->donation_elem,thread_priority_more,NULL);
+      
+      //Propagação da doação
       holder = lock->holder;
-
       while (holder != NULL && depth < 8)
         {
+          //Se a prioridade da thread atual for maior, doa para o dono do lock
           if (holder->priority < cur->priority)
             holder->priority = cur->priority;
 
-          if (holder->waiting_on_lock == NULL)
+          else
             break;
-
-          holder = holder->waiting_on_lock->holder;
+          
+          //Verifica se o dono também está esperando um lock
+          struct lock *next_lock = holder->waiting_lock;
+          if(next_lock !=NULL)
+            holder = next_lock->holder;
+          else
+            holder = NULL;
+          
           depth++;
         }
     }
 
   sema_down (&lock->semaphore);
 
-  cur->waiting_on_lock = NULL;
+  cur->waiting_lock = NULL;
   lock->holder = cur;
 }
 // ------------------------------------------------------------------------------------------------ // 
@@ -294,7 +307,11 @@ lock_try_acquire (struct lock *lock)
    An interrupt handler cannot acquire a lock, so it does not
    make sense to try to release a lock within an interrupt
    handler. */
-void
+
+// -------------------------------------------- MODIFICAÇÃO -------------------------------------------- //
+
+/*
+void 
 lock_release (struct lock *lock) 
 {
   ASSERT (lock != NULL);
@@ -303,6 +320,40 @@ lock_release (struct lock *lock)
   lock->holder = NULL;
   sema_up (&lock->semaphore);
 }
+*/
+
+void 
+lock_release (struct lock *lock) 
+{
+  ASSERT (lock != NULL);
+  ASSERT (lock_held_by_current_thread (lock));
+
+  struct thread *cur = thread_current();
+
+  //Removendo da lista de doação todas as threads que esperavam este lock
+  struct list_elem *e = list_begin(&cur->donations);
+  while(e != list_end(&cur->donations)){
+    struct thread *t = list_entry(e,struct thread,donation_elem);
+
+    if(t->waiting_lock == lock)
+      e = list_remove(e); // removendo a doação associada com esse lock
+    else
+      e = list_next(e);
+  }
+
+  //Recalcular a prioridade efetiva
+  thread_update(cur);
+
+  lock->holder = NULL;
+
+  sema_up (&lock->semaphore);
+
+  /*Se houver thread mais prioritária, ceder CPU */
+  thread_yield_cond();
+
+}
+
+// ------------------------------------------------------------------------------------------------ // 
 
 /* Returns true if the current thread holds LOCK, false
    otherwise.  (Note that testing whether some other thread holds
