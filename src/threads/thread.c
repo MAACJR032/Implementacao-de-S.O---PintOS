@@ -208,6 +208,10 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+/* PRIORITY PREEMPTION ---------------------- MODIFICAÇÃO ---------------------- */ 
+  if (t->priority > thread_current()->priority) {
+      thread_yield();
+  }
 
   return tid;
 }
@@ -241,6 +245,10 @@ thread_block (void)
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
    update other data. */
+
+// -------------------------------------------- MODIFICAÇÃO -------------------------------------------- //
+
+/*
 void
 thread_unblock (struct thread *t) 
 {
@@ -253,8 +261,34 @@ thread_unblock (struct thread *t)
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
   intr_set_level (old_level);
+*/
+bool thread_priority_more (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  const struct thread *ta = list_entry(a, struct thread, elem);
+  const struct thread *tb = list_entry(b, struct thread, elem);
+
+  return ta->priority > tb->priority;
 }
 
+void
+thread_unblock (struct thread *t) 
+{
+  enum intr_level old_level;
+
+  ASSERT (is_thread (t));
+
+  old_level = intr_disable ();
+  ASSERT (t->status == THREAD_BLOCKED);
+
+  /*Inserção ordenada por prioridade */
+  list_insert_ordered (&ready_list, &t->elem, thread_priority_more, NULL);
+
+  t->status = THREAD_READY;
+
+  intr_set_level (old_level);
+}
+
+// ------------------------------------------------------------------------------------------------ // 
 /* Returns the name of the running thread. */
 const char *
 thread_name (void) 
@@ -311,7 +345,9 @@ thread_exit (void)
 
 /* Yields the CPU.  The current thread is not put to sleep and
    may be scheduled again immediately at the scheduler's whim. */
-void
+// -------------------------------------------- MODIFICAÇÃO -------------------------------------------- //
+
+/*void
 thread_yield (void) 
 {
   struct thread *cur = thread_current ();
@@ -326,7 +362,23 @@ thread_yield (void)
   schedule ();
   intr_set_level (old_level);
 }
+*/
+void
+thread_yield (void) 
+{
+  struct thread *cur = thread_current ();
+  enum intr_level old_level;
+  
+  ASSERT (!intr_context ());
 
+  old_level = intr_disable ();
+  if (cur != idle_thread) 
+    list_insert_ordered (&ready_list, &cur->elem, thread_priority_more, NULL);
+  cur->status = THREAD_READY;
+  schedule ();
+  intr_set_level (old_level);
+}
+// ------------------------------------------------------------------------------------------------ // 
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -345,11 +397,30 @@ thread_foreach (thread_action_func *func, void *aux)
 }
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
-void
+// -------------------------------------------- MODIFICAÇÃO -------------------------------------------- //
+
+/*void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+}*/
+
+void
+thread_set_priority (int new_priority) 
+{
+  struct thread *cur = thread_current ();
+  cur->priority = new_priority;
+
+  /*Se houver thread mais prioritária, ceder CPU */
+  if (!list_empty(&ready_list)) {
+    struct thread *highest = list_entry(list_front(&ready_list), struct thread, elem);
+
+    if (highest->priority > cur->priority) {
+      thread_yield();
+    }
+  }
 }
+// ------------------------------------------------------------------------------------------------ // 
 
 /* Returns the current thread's priority. */
 int
@@ -476,6 +547,9 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+  t->original_priority = priority;
+  t->waiting_lock = NULL;
+  list_init (&t->donations);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
