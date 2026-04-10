@@ -29,6 +29,9 @@ tid_t
 process_execute (const char *file_name) 
 {
   char *fn_copy;
+  char *fn_copy_exec_name;
+  char *save_ptr;
+  char *exec_name;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -38,10 +41,28 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Segunda cópia só para extrair o nome */
+  fn_copy_exec_name = palloc_get_page (0);
+  if (fn_copy_exec_name == NULL)
+  {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+  strlcpy (fn_copy_exec_name, file_name, PGSIZE);
+
+  /* Extrai o primeiro token (nome do executável) */
+  exec_name = strtok_r(fn_copy_exec_name, " ", &save_ptr);
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(exec_name, PRI_DEFAULT, start_process, fn_copy);
+
+  // tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+  
+  palloc_free_page(fn_copy_exec_name);  
+
   return tid;
 }
 
@@ -221,8 +242,25 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  char *fn_copy_exec_name;
+  char *save_ptr;
+  char *exec_name;
+
+  /* cópia só para extrair o nome */
+  fn_copy_exec_name = palloc_get_page (0);
+  if (fn_copy_exec_name == NULL)
+  {
+    return TID_ERROR;
+  }
+  strlcpy (fn_copy_exec_name, file_name, PGSIZE);
+
+  /* Extrai o primeiro token (nome do executável) */
+  exec_name = strtok_r(fn_copy_exec_name, " ", &save_ptr);
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (exec_name);
+  // file = filesys_open (file_name);
+
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
@@ -302,7 +340,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, file_name))
     goto done;
 
   /* Start address. */
@@ -427,7 +465,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, char *file_name) 
 {
   uint8_t *kpage;
   bool success = false;

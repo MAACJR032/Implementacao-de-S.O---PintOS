@@ -3,7 +3,7 @@
 
 void syscall_init(void);
 typedef int pid_t;
-typedef int mapip_t;
+typedef int mapid_t;
 
 #define EXIT_SUCCESS 0 /* Successful execution. */
 #define EXIT_FAILURE 1 /* Unsuccessful execution. */
