@@ -1,3 +1,4 @@
+#include "threads/synch.h"
 #include "userprog/process.h"
 #include <debug.h>
 #include <inttypes.h>
@@ -20,6 +21,16 @@
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+
+/* Structure to track child process status for wait/exit. */
+struct child_status {
+  tid_t tid;
+  int exit_status;
+  bool exited;
+  bool waited;
+  struct semaphore sema;
+  struct list_elem elem;
+};
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -109,7 +120,12 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  while (true)
+  {
+    thread_yield();
+  }
+  
+  // return -1;
 }
 
 /* Free the current process's resources. */
@@ -216,7 +232,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, char *file_name);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,

@@ -102,6 +102,12 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct list children;              /* List of child processes (struct child_status). */
+    struct list_elem child_elem;       /* List element for parent's children list. */
+    struct semaphore wait_sema;        /* For parent to wait on child. */
+    int exit_status;                   /* Exit status for wait/exit. */
+    bool waited;                       /* If wait was already called. */
+   tid_t parent_tid;                  /* Parent process tid. */
 #endif
 
     /* Owned by thread.c. */
