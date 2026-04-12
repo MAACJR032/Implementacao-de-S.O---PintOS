@@ -484,17 +484,76 @@ static bool
 setup_stack (void **esp, char *file_name) 
 {
   uint8_t *kpage;
+  char *argv[128];
+  char *pointers[128];
+  int argc = 0;
+  int i;
+  char *save_ptr;
+  char *token;      
   bool success = false;
+  size_t alinhar = 0;
+  char **end_argv;
+  char *fn_copy_exec_name;
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   if (kpage != NULL) 
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        {
+          *esp = PHYS_BASE;
+
+          fn_copy_exec_name = palloc_get_page (0);
+          if (fn_copy_exec_name == NULL)
+            return false;
+          strlcpy (fn_copy_exec_name, file_name, PGSIZE);
+
+          for (token = strtok_r (fn_copy_exec_name, " ", &save_ptr);
+               token != NULL;
+               token = strtok_r (NULL, " ", &save_ptr))
+            {
+              argv[argc++] = token;
+            }
+
+          for (i = argc - 1; i >= 0; i--)
+            {
+              size_t length = strlen (argv[i]) + 1;
+              *esp -= length;
+              memcpy (*esp, argv[i], length);
+              pointers[i] = *esp;
+            }
+
+          alinhar = (uintptr_t)*esp % 4;
+          *esp -= alinhar;
+          memset (*esp, 0, alinhar);
+
+          *esp -= sizeof (char *);
+          memset (*esp, 0, sizeof (char *));
+
+          for (i = argc - 1; i >= 0; i--)
+            {
+              *esp -= sizeof (char *);
+              memcpy (*esp, &pointers[i], sizeof (char *));
+            }
+
+          end_argv = (char **)*esp;
+          *esp -= sizeof (char **);
+          memcpy (*esp, &end_argv, sizeof (char **));
+
+          *esp -= sizeof (int);
+          memcpy (*esp, &argc, sizeof (int));
+
+          *esp -= sizeof (void *);
+          memset (*esp, 0, sizeof (void *));
+
+          hex_dump ((uintptr_t)*esp, *esp, PHYS_BASE - *esp, true);
+
+          palloc_free_page (fn_copy_exec_name);
+        }
       else
         palloc_free_page (kpage);
     }
+
   return success;
 }
 
