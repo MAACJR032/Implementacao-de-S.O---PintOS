@@ -22,15 +22,6 @@
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
-/* Structure to track child process status for wait/exit. */
-struct child_status {
-  tid_t tid;
-  int exit_status;
-  bool exited;
-  bool waited;
-  struct semaphore sema;
-  struct list_elem elem;
-};
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -118,14 +109,35 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid)
 {
-  while (true)
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+
+  /* procura o filho na lista de filhos */
+  for (e = list_begin(&cur->children);
+     e != list_end(&cur->children);
+     e = list_next(e))
   {
-    thread_yield();
+    struct child_status *cs = list_entry(e, struct child_status, elem);
+
+    if (cs->tid == child_tid)
+      {
+        if (cs->waited)
+          return -1;
+
+        cs->waited = true;
+
+        if (!cs->exited)
+          sema_down(&cs->sema);
+
+        int status = cs->exit_status;
+        list_remove(&cs->elem);
+        palloc_free_page(cs);   /* pai libera a página */
+        return status;
+      }
   }
-  
-  // return -1;
+return -1;
 }
 
 /* Free the current process's resources. */
@@ -134,6 +146,14 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+    /* acorda o pai se ele estiver esperando */
+  if (cur->my_status != NULL)
+  {
+    cur->my_status->exit_status = cur->exit_status;
+    cur->my_status->exited = true;
+    sema_up(&cur->my_status->sema);
+  }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -484,17 +504,75 @@ static bool
 setup_stack (void **esp, char *file_name) 
 {
   uint8_t *kpage;
+  char *argv[128];
+  char *pointers[128];
+  int argc = 0;
+  int i;
+  char *save_ptr;
+  char *token;      
   bool success = false;
+  size_t alinhar = 0;
+  char **end_argv;
+  char *fn_copy_exec_name;
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   if (kpage != NULL) 
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        {
+          *esp = PHYS_BASE;
+
+          fn_copy_exec_name = palloc_get_page (0);
+          if (fn_copy_exec_name == NULL)
+            return false;
+          strlcpy (fn_copy_exec_name, file_name, PGSIZE);
+
+          for (token = strtok_r (fn_copy_exec_name, " ", &save_ptr);
+               token != NULL;
+               token = strtok_r (NULL, " ", &save_ptr))
+            {
+              argv[argc++] = token;
+            }
+
+          for (i = argc - 1; i >= 0; i--)
+            {
+              size_t length = strlen (argv[i]) + 1;
+              *esp -= length;
+              memcpy (*esp, argv[i], length);
+              pointers[i] = *esp;
+            }
+
+          alinhar = (uintptr_t)*esp % 4;
+          *esp -= alinhar;
+          memset (*esp, 0, alinhar);
+
+          *esp -= sizeof (char *);
+          memset (*esp, 0, sizeof (char *));
+
+          for (i = argc - 1; i >= 0; i--)
+            {
+              *esp -= sizeof (char *);
+              memcpy (*esp, &pointers[i], sizeof (char *));
+            }
+
+          end_argv = (char **)*esp;
+          *esp -= sizeof (char **);
+          memcpy (*esp, &end_argv, sizeof (char **));
+
+          *esp -= sizeof (int);
+          memcpy (*esp, &argc, sizeof (int));
+
+          *esp -= sizeof (void *);
+          memset (*esp, 0, sizeof (void *));
+
+
+          palloc_free_page (fn_copy_exec_name);
+        }
       else
         palloc_free_page (kpage);
     }
+
   return success;
 }
 

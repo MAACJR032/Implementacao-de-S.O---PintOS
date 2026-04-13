@@ -9,6 +9,14 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static bool
+is_valid_ptr(const void *ptr)
+{
+    return ptr != NULL
+        && is_user_vaddr(ptr)
+        && pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
+}
+
 static void syscall_handler (struct intr_frame *);
 
 void
@@ -20,6 +28,8 @@ syscall_init (void)
 /* Implementação mínima de exit para o kernel */
 void exit(int status)
 {
+  thread_current()->exit_status = status;
+  printf("%s: exit(%d)\n", thread_current()->name, status);
   thread_exit();
 }
 
@@ -42,7 +52,9 @@ syscall_handler (struct intr_frame *f)
   {
     exit (-1);
   }
-
+  if(!is_valid_ptr(f->esp)) {
+    exit(-1);
+  }
   int syscall_num = *(int *) f->esp;
   switch (syscall_num)
   {
@@ -50,6 +62,8 @@ syscall_handler (struct intr_frame *f)
     {
       int fd = *((int*)f->esp + 1);
       void* buffer = (void*)(*((int*)f->esp + 2));
+      if (!is_valid_ptr(buffer))
+        exit(-1);
       unsigned size = *((unsigned*)f->esp + 3);
       f->eax = write(fd, buffer, size);
       break;
@@ -57,6 +71,8 @@ syscall_handler (struct intr_frame *f)
     
     case SYS_EXIT:
     {
+      if (!is_valid_ptr((int*)f->esp + 1))
+        exit(-1);
       int status = *((int*)f->esp + 1);
       exit(status);
       // Não retorna

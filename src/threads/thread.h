@@ -1,6 +1,7 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
 
+#include "threads/synch.h"
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
@@ -83,18 +84,14 @@ typedef int tid_t;
 struct thread
   {
     /* Owned by thread.c. */
+    int niceness;                       /*Bondade da thread*/
+    int recent_cpu;                     /* Cpu recente */
     tid_t tid;                          /* Thread identifier. */
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-    int original_priority;             /* Prioridade real/base da thread. */                 // ----------- ADD
-    int64_t tick_to_wake_up;            /* start + sleepTime */
     struct list_elem allelem;           /* List element for all threads list. */
-
-    struct lock *waiting_lock;         /* Lock que a thread está tentando adquirir. */       // ----------- ADD
-    struct list donations;             /* Threads que doaram prioridade para esta thread. */ // ----------- ADD
-    struct list_elem donation_elem;    /* Elemento para entrar na lista de donations. */     // ----------- ADD
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
@@ -102,17 +99,28 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    struct thread *parent; 
     struct list children;              /* List of child processes (struct child_status). */
     struct list_elem child_elem;       /* List element for parent's children list. */
+    struct child_status *my_status;
     struct semaphore wait_sema;        /* For parent to wait on child. */
     int exit_status;                   /* Exit status for wait/exit. */
-    bool waited;                       /* If wait was already called. */
    tid_t parent_tid;                  /* Parent process tid. */
 #endif
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+  /* Structure to track child process status for wait/exit. */
+struct child_status {
+  tid_t tid;
+  int exit_status;
+  bool exited;
+  bool waited;
+  struct semaphore sema;
+  struct list_elem elem;
+};
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -131,6 +139,9 @@ tid_t thread_create (const char *name, int priority, thread_func *, void *);
 void thread_block (void);
 void thread_unblock (struct thread *);
 
+void thread_sleep (int64_t tiques);
+void thread_wake (int64_t tiques);
+
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
@@ -138,18 +149,14 @@ const char *thread_name (void);
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
 
-void thread_yield_block(int64_t tick_to_wake_up);
-
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
-bool thread_priority_more (const struct list_elem *a, const struct list_elem *b, void *aux);
-void thread_update(struct thread *t);
-void thread_yield_cond(void);
 
+int thread_get_highest_priority(void); //nova funcao para pegar a maior prioridade atual
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
