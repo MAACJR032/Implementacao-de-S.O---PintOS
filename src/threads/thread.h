@@ -106,6 +106,7 @@ struct thread
     struct semaphore wait_sema;        /* For parent to wait on child. */
     int exit_status;                   /* Exit status for wait/exit. */
    tid_t parent_tid;                  /* Parent process tid. */
+   struct file* DA[128];               /*Descrtor de arquivos*/
 #endif
 
     /* Owned by thread.c. */

@@ -8,6 +8,11 @@
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "filesys/file.h"
+#include "filesys/filesys.h"
+
+struct lock lock_file;//adicionei
+#define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
 
 static bool
 is_valid_ptr(const void *ptr)
@@ -22,14 +27,23 @@ static void syscall_handler (struct intr_frame *);
 void
 syscall_init (void) 
 {
+  lock_init(&lock_file);//adicionei
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
-/* Implementação mínima de exit para o kernel */
+/* Implementação de exit para o kernel */
 void exit(int status)
 {
-  thread_current()->exit_status = status;
-  printf("%s: exit(%d)\n", thread_current()->name, status);
+  struct thread *cur = thread_current();
+  printf("%s: exit(%d)\n", cur->name, status);
+  cur->exit_status = status;
+  for(int i = 3;i<128;i++){
+    // Fecha os arquivos abertos por aquele processo
+    if(cur->DA[i]){
+      file_close(cur->DA[i]);
+      cur->DA[i] = NULL;
+    }
+  }
   thread_exit();
 }
 
@@ -58,6 +72,32 @@ syscall_handler (struct intr_frame *f)
   int syscall_num = *(int *) f->esp;
   switch (syscall_num)
   {
+
+    //adicionei
+    case SYS_HALT: 
+    {
+      shutdown_power_off();
+      break;
+    }
+    //ajustei
+    case SYS_EXIT:
+    {
+      if (!is_valid_ptr((void*)f->esp + 4))
+        exit(-1);
+
+      exit((int)VAR1);
+      break;
+    }
+    //adicionei
+    case SYS_EXEC:
+    {
+      if (!is_valid_ptr((int*)f->esp + 4))
+        exit(-1);
+
+      f->eax = process_execute((const char*)VAR1);
+      break;
+    }
+
     case SYS_WRITE:
     {
       int fd = *((int*)f->esp + 1);
@@ -69,24 +109,34 @@ syscall_handler (struct intr_frame *f)
       break;
     }
     
-    case SYS_EXIT:
-    {
-      if (!is_valid_ptr((int*)f->esp + 1))
-        exit(-1);
-      int status = *((int*)f->esp + 1);
-      exit(status);
-      // Não retorna
-      break;
-    }
-    
+    //ajustei
     case SYS_WAIT:
     {
-      int child_tid = *((int*)f->esp + 1);
-      f->eax = process_wait(child_tid);
+      if (!is_valid_ptr((int*)f->esp + 4))
+        exit(-1);
+
+      f->eax = process_wait((tid_t)VAR1);
+      break;
+    }
+
+    //adicionei
+    case SYS_REMOVE:
+    {
+      if (!is_valid_ptr((int*)f->esp + 4))
+        exit(-1);
+
+      const char* file = (const char*)VAR1;
+      if(!file){
+        exit(-1);
+      }
+      
+      f->eax = filesys_remove(file);
+
       break;
     }
 
     default:
       break;
   }
+
 }
