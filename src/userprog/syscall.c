@@ -22,6 +22,18 @@ is_valid_ptr(const void *ptr)
         && pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
 }
 
+static void
+check_valid_buffer (const void *buffer, unsigned size)
+{
+  char *ptr = (char *) buffer;
+  for (unsigned i = 0; i < size; i++) 
+  {
+    if (!is_valid_ptr(ptr + i)) 
+    {
+      exit(-1); // Se qualquer byte do buffer for inválido, mata o processo
+    }
+  }
+}
 static void syscall_handler (struct intr_frame *);
 
 void
@@ -66,9 +78,8 @@ syscall_handler (struct intr_frame *f)
   {
     exit (-1);
   }
-  if(!is_valid_ptr(f->esp)) {
-    exit(-1);
-  }
+  // 1. Valida os 4 bytes do número da syscall
+  check_valid_buffer(f->esp, sizeof(int));
   int syscall_num = *(int *) f->esp;
   switch (syscall_num)
   {
@@ -100,11 +111,21 @@ syscall_handler (struct intr_frame *f)
 
     case SYS_WRITE:
     {
+      // 1. Valida se os argumentos na pilha estão em endereços válidos
+      if (!is_valid_ptr((int*)f->esp + 1) || 
+          !is_valid_ptr((int*)f->esp + 2) || 
+          !is_valid_ptr((int*)f->esp + 3)) {
+        exit(-1);
+      }
+
       int fd = *((int*)f->esp + 1);
       void* buffer = (void*)(*((int*)f->esp + 2));
-      if (!is_valid_ptr(buffer))
-        exit(-1);
       unsigned size = *((unsigned*)f->esp + 3);
+
+      // 2. Valida o buffer INTEIRO (Resolve o sc-boundary-3!)
+      check_valid_buffer(buffer, size);
+
+      // 3. Chama a função de escrita
       f->eax = write(fd, buffer, size);
       break;
     }
@@ -126,11 +147,16 @@ syscall_handler (struct intr_frame *f)
         exit(-1);
 
       const char* file = (const char*)VAR1;
-      if(!file){
+      
+      // Valida se a string em si está em memória válida
+      if (!is_valid_ptr(file)) {
         exit(-1);
       }
       
+      // Protege o File System com o seu Lock!
+      lock_acquire(&lock_file);
       f->eax = filesys_remove(file);
+      lock_release(&lock_file);
 
       break;
     }
