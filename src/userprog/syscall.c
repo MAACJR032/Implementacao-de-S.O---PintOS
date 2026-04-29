@@ -79,6 +79,7 @@ syscall_handler (struct intr_frame *f)
       shutdown_power_off();
       break;
     }
+
     //ajustei
     case SYS_EXIT:
     {
@@ -88,6 +89,7 @@ syscall_handler (struct intr_frame *f)
       exit((int)VAR1);
       break;
     }
+    
     //adicionei
     case SYS_EXEC:
     {
@@ -95,17 +97,6 @@ syscall_handler (struct intr_frame *f)
         exit(-1);
 
       f->eax = process_execute((const char*)VAR1);
-      break;
-    }
-
-    case SYS_WRITE:
-    {
-      int fd = *((int*)f->esp + 1);
-      void* buffer = (void*)(*((int*)f->esp + 2));
-      if (!is_valid_ptr(buffer))
-        exit(-1);
-      unsigned size = *((unsigned*)f->esp + 3);
-      f->eax = write(fd, buffer, size);
       break;
     }
     
@@ -118,6 +109,13 @@ syscall_handler (struct intr_frame *f)
       f->eax = process_wait((tid_t)VAR1);
       break;
     }
+
+    /*
+    case SYS_CREATE:
+    {
+      
+    }
+    */
 
     //adicionei
     case SYS_REMOVE:
@@ -134,7 +132,74 @@ syscall_handler (struct intr_frame *f)
 
       break;
     }
+    /*
+    case SYS_OPEN:
+    {
 
+    }
+
+    case SYS_FILESIZE:
+    {
+
+    }
+
+    case SYS_READ:
+    {
+
+    }
+    */
+
+    case SYS_WRITE:
+    {
+      int fd = *((int*)f->esp + 1);
+      void* buffer = (void*)(*((int*)f->esp + 2));
+      if (!is_valid_ptr(buffer))
+        exit(-1);
+      unsigned size = *((unsigned*)f->esp + 3);
+      f->eax = write(fd, buffer, size);
+      break;
+    }
+
+    /*
+    case SYS_SEEK:
+    {
+      
+    }
+    */
+
+
+    //adicionei
+    case SYS_TELL:
+    {
+      if (!is_valid_ptr((int*)f->esp + 4))
+        exit(-1);
+        
+      int fd = (int)VAR1;
+  
+      if(thread_current()->DA[fd] == NULL)
+        exit(-1);
+
+      f->eax =file_tell(thread_current()->DA[fd]);
+      break;
+    }
+
+    //adicionei
+    case SYS_CLOSE:
+    {
+      if (!is_valid_ptr((int*)f->esp + 4))
+        exit(-1);
+
+      int fd = (int)VAR1;
+  
+      if(thread_current()->DA[fd] == NULL)
+        exit(-1);
+
+      file_close(thread_current()->DA[fd]);
+      thread_current()->DA[fd] = NULL;
+      break;
+    }
+
+   
     default:
       break;
   }
