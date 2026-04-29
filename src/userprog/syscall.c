@@ -13,6 +13,7 @@
 
 struct lock lock_file;//adicionei
 #define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
+#define VAR2 (*(uint32_t *)(f->esp + 8)) //Variavel "coringa2" (ADICIONEI)
 
 static bool
 is_valid_ptr(const void *ptr)
@@ -83,7 +84,7 @@ syscall_handler (struct intr_frame *f)
     //ajustei
     case SYS_EXIT:
     {
-      if (!is_valid_ptr((void*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
       exit((int)VAR1);
@@ -93,7 +94,7 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_EXEC:
     {
-      if (!is_valid_ptr((int*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
       f->eax = process_execute((const char*)VAR1);
@@ -103,24 +104,30 @@ syscall_handler (struct intr_frame *f)
     //ajustei
     case SYS_WAIT:
     {
-      if (!is_valid_ptr((int*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
       f->eax = process_wait((tid_t)VAR1);
       break;
     }
 
-    /*
+    //adicionei
     case SYS_CREATE:
     {
-      
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      if(!(VAR1) && !(VAR2))
+        exit(-1);
+
+      f->eax = filesys_create((const char*)VAR1,(unsigned)VAR2);
+      break;
     }
-    */
 
     //adicionei
     case SYS_REMOVE:
     {
-      if (!is_valid_ptr((int*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
       const char* file = (const char*)VAR1;
@@ -132,12 +139,47 @@ syscall_handler (struct intr_frame *f)
 
       break;
     }
-    /*
+    
     case SYS_OPEN:
     {
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
 
+      const char *file_name = (const char*)VAR1;
+
+      if (!is_valid_ptr(file_name))
+        exit(-1);
+      
+      lock_acquire(&lock_file);
+
+      struct file *file_open = filesys_open(file_name);
+      int resultado = -1;
+
+      if(file_open){
+        for(int i = 3;i<128;i++){
+          if(!thread_current()->DA[i]){
+            if(!strcmp(thread_current()->name,file_name)){
+              file_deny_write(file_open);
+            }
+          thread_current()->DA[i] = file_open;
+          resultado=i;
+          break;
+          }
+        }
+
+        //caso não tenha slot em DA, fazer isso para evitar vazamento
+        if(resultado == -1)
+        file_close(file_open);
+        
+      }
+
+      lock_release(&lock_file);
+      f->eax = resultado;
+
+      break;
     }
 
+    /*
     case SYS_FILESIZE:
     {
 
@@ -160,18 +202,26 @@ syscall_handler (struct intr_frame *f)
       break;
     }
 
-    /*
+    //adicionei
     case SYS_SEEK:
     {
-      
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      int fd = (int)VAR1;
+      unsigned pos = (unsigned)VAR2;
+      if(thread_current()->DA[fd] == NULL)
+        exit(-1);
+
+      file_seek(thread_current()->DA[fd],pos);
+      break;
     }
-    */
 
 
     //adicionei
     case SYS_TELL:
     {
-      if (!is_valid_ptr((int*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
         
       int fd = (int)VAR1;
@@ -186,7 +236,7 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_CLOSE:
     {
-      if (!is_valid_ptr((int*)f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
       int fd = (int)VAR1;
