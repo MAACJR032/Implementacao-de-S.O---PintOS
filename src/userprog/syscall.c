@@ -111,27 +111,6 @@ syscall_handler (struct intr_frame *f)
       f->eax = process_execute((const char*)VAR1);
       break;
     }
-
-    case SYS_WRITE:
-    {
-      // 1. Valida se os argumentos na pilha estão em endereços válidos
-      if (!is_valid_ptr((int*)f->esp + 1) || 
-          !is_valid_ptr((int*)f->esp + 2) || 
-          !is_valid_ptr((int*)f->esp + 3)) {
-        exit(-1);
-      }
-
-      int fd = *((int*)f->esp + 1);
-      void* buffer = (void*)(*((int*)f->esp + 2));
-      unsigned size = *((unsigned*)f->esp + 3);
-
-      // 2. Valida o buffer INTEIRO (Resolve o sc-boundary-3!)
-      check_valid_buffer(buffer, size);
-
-      // 3. Chama a função de escrita
-      f->eax = write(fd, buffer, size);
-      break;
-    }
     
     //ajustei
     case SYS_WAIT:
@@ -216,27 +195,116 @@ syscall_handler (struct intr_frame *f)
       break;
     }
 
-    /*
     case SYS_FILESIZE:
     {
+      // 1. Valida o ponteiro da pilha para o argumento
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
 
+      // 2. Obtém o file descriptor através da sua macro
+      int fd = (int)VAR1;
+
+      // 3. Validação do FD: Garante que está nos limites do array (3 a 127) e que está aberto
+      if (fd < 3 || fd >= 128 || thread_current()->DA[fd] == NULL) {
+        exit(-1); 
+      }
+
+      // 4. Sincronização: Bloqueia o sistema de arquivos para leitura
+      lock_acquire(&lock_file);
+
+      // 5. Chamada ao File System e retorno via eax
+      f->eax = file_length(thread_current()->DA[fd]);
+
+      // 6. Liberação do lock
+      lock_release(&lock_file);
+
+      break;
     }
 
+    // ADD
     case SYS_READ:
     {
+      // 1. Valida se os endereços dos três argumentos na pilha são válidos
+      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8) || !is_valid_ptr(f->esp + 12)) {
+        exit(-1);
+      }
 
+      // 2. Extrai os argumentos da pilha
+      int fd = (int)VAR1;
+      void *buffer = (void *)VAR2;
+      unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12));
+
+      // 3. Valida TODO o buffer de usuário (extremamente importante no read)
+      check_valid_buffer(buffer, size);
+
+      // 4. Lógica de Leitura
+      if (fd == 0) {
+        // Lê do teclado (stdin) usando input_getc()
+        uint8_t *buf = (uint8_t *)buffer;
+        for (unsigned i = 0; i < size; i++) {
+          buf[i] = input_getc();
+        }
+        f->eax = size;
+      } 
+      else if (fd >= 3 && fd < 128) {
+        // Obtém o arquivo da tabela de descritores do processo
+        struct file *f_ptr = thread_current()->DA[fd];
+        
+        // Se o arquivo não estiver aberto, encerra o processo
+        if (f_ptr == NULL) {
+          exit(-1);
+        }
+
+        // Adquire o lock, lê com file_read e libera o lock
+        lock_acquire(&lock_file);
+        f->eax = file_read(f_ptr, buffer, size);
+        lock_release(&lock_file);
+      } 
+      else {
+        // Tentar ler de stdout (fd == 1) ou fds inválidos resulta em erro
+        f->eax = -1;
+      }
+      break;
     }
-    */
-
+    
+    // ADD
     case SYS_WRITE:
     {
-      int fd = *((int*)f->esp + 1);
-      void* buffer = (void*)(*((int*)f->esp + 2));
-      if (!is_valid_ptr(buffer))
-        exit(-1);
-      unsigned size = *((unsigned*)f->esp + 3);
-      f->eax = write(fd, buffer, size);
-      break;
+        // 1. Valida se os endereços dos três argumentos na pilha são válidos
+        if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8) || !is_valid_ptr(f->esp + 12)) {
+            exit(-1);
+        }
+
+        // 2. Extrai os argumentos usando a lógica existente
+        int fd = (int)VAR1;
+        const void *buffer = (const void *)VAR2;
+        unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12)); // Criando a lógica para um "VAR3"
+
+        // 3. Valida TODO o buffer, e não apenas o primeiro byte
+        check_valid_buffer(buffer, size);
+
+        // 4. Lógica de Escrita
+        if (fd == 1) {
+            // Escreve no console
+            putbuf(buffer, size);
+            f->eax = size;
+        } 
+        else if (fd >= 3 && fd < 128) {
+            // Escreve em um arquivo
+            struct file *f_ptr = thread_current()->DA[fd];
+            if (f_ptr == NULL) {
+                exit(-1);
+            }
+            
+            lock_acquire(&lock_file);
+            f->eax = file_write(f_ptr, buffer, size);
+            lock_release(&lock_file);
+        } 
+        else {
+            // fd 0 (stdin) ou fds inválidos
+            f->eax = -1; // ou exit(-1), dependendo da especificação do seu professor
+        }
+        break;
     }
 
     //adicionei
@@ -253,7 +321,6 @@ syscall_handler (struct intr_frame *f)
       file_seek(thread_current()->DA[fd],pos);
       break;
     }
-
 
     //adicionei
     case SYS_TELL:
