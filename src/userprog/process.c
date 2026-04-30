@@ -60,9 +60,29 @@ process_execute (const char *file_name)
 
   // tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
   
+  /* 1. Se a criação da thread falhou logo de cara */
   if (tid == TID_ERROR)
+  {
     palloc_free_page (fn_copy); 
-  
+    palloc_free_page(fn_copy_exec_name);
+    return TID_ERROR;
+  }
+
+  /* 2. Sincronização: O Pai espera o Filho tentar fazer o load() */
+  struct thread *child = get_thread_by_tid(tid);
+  if (child != NULL) 
+  {
+    // O Pai dorme aqui esperando a thread filha rodar o start_process
+    sema_down(&child->sema_load); 
+
+    // O Pai acorda e verifica se o filho conseguiu abrir o arquivo no disco
+    if (!child->load_success) 
+    {
+      tid = -1; // Se falhou (ex: arquivo não existe), o exec retorna -1
+    }
+  }
+
+  /* 3. Limpa a página auxiliar usada para o nome e retorna */
   palloc_free_page(fn_copy_exec_name);  
 
   return tid;
@@ -83,6 +103,10 @@ start_process (void *file_name_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
+
+  struct thread *cur = thread_current();
+  cur->load_success = success;
+  sema_up(&cur->sema_load); // Libera o pai para continuar
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
@@ -252,7 +276,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp, char *file_name);
+static bool setup_stack (void **esp, const char *file_name);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -501,7 +525,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp, char *file_name) 
+setup_stack (void **esp, const char *file_name) 
 {
   uint8_t *kpage;
   char *argv[128];

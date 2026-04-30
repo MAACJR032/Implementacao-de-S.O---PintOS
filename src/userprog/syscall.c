@@ -10,6 +10,7 @@
 #include "threads/thread.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "userprog/pagedir.h"
 
 struct lock lock_file;//adicionei
 #define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
@@ -21,6 +22,30 @@ is_valid_ptr(const void *ptr)
     return ptr != NULL
         && is_user_vaddr(ptr)
         && pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
+}
+static void check_valid_string(const void *str);
+static void
+check_valid_string(const void *str)
+{
+  if (str == NULL) {
+    exit(-1);
+  }
+
+  char *ptr = (char *)str;
+  while (true) {
+    // 1. PRIMEIRO verificamos se o endereço deste byte é válido na memória do usuário
+    if (!is_valid_ptr(ptr)) {
+      exit(-1); // Se cruzou para memória inválida antes do \0, mata o processo
+    }
+    
+    // 2. SÓ DEPOIS de confirmar que é seguro, lemos o conteúdo para ver se a string acabou
+    if (*ptr == '\0') {
+      break;
+    }
+    
+    // Avança para o próximo byte
+    ptr++;
+  }
 }
 
 static void
@@ -53,7 +78,9 @@ void exit(int status)
   for(int i = 3;i<128;i++){
     // Fecha os arquivos abertos por aquele processo
     if(cur->DA[i]){
+      lock_acquire(&lock_file); // ADICIONE O LOCK AQUI
       file_close(cur->DA[i]);
+      lock_release(&lock_file); // LIBERE O LOCK AQUI
       cur->DA[i] = NULL;
     }
   }
@@ -108,7 +135,12 @@ syscall_handler (struct intr_frame *f)
       if (!is_valid_ptr(f->esp + 4))
         exit(-1);
 
-      f->eax = process_execute((const char*)VAR1);
+      const char *cmd_line = (const char*)VAR1;
+      
+      // Valida a string byte a byte até o \0
+      check_valid_string(cmd_line);
+
+      f->eax = process_execute(cmd_line);
       break;
     }
     
@@ -125,13 +157,21 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_CREATE:
     {
-      if (!is_valid_ptr(f->esp + 4))
+      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8))
         exit(-1);
 
-      if(!(VAR1) && !(VAR2))
+      const char *file_name = (const char*)VAR1;
+
+      // Valida a string inteira do nome do arquivo!
+      check_valid_string(file_name);
+      
+      // Verifica se o ponteiro da string do nome do arquivo é válido
+      if (!is_valid_ptr(file_name))
         exit(-1);
 
-      f->eax = filesys_create((const char*)VAR1,(unsigned)VAR2);
+      lock_acquire(&lock_file); // ADICIONADO
+      f->eax = filesys_create(file_name, (unsigned)VAR2);
+      lock_release(&lock_file); // ADICIONADO
       break;
     }
 
@@ -142,6 +182,9 @@ syscall_handler (struct intr_frame *f)
         exit(-1);
 
       const char* file = (const char*)VAR1;
+
+      // Valida a string inteira do nome do arquivo!
+      check_valid_string(file);
       
       // Valida se a string em si está em memória válida
       if (!is_valid_ptr(file)) {
@@ -162,6 +205,9 @@ syscall_handler (struct intr_frame *f)
         exit(-1);
 
       const char *file_name = (const char*)VAR1;
+
+      // Valida a string inteira do nome do arquivo!
+      check_valid_string(file_name);
 
       if (!is_valid_ptr(file_name))
         exit(-1);
@@ -195,6 +241,7 @@ syscall_handler (struct intr_frame *f)
       break;
     }
 
+    // ADD
     case SYS_FILESIZE:
     {
       // 1. Valida o ponteiro da pilha para o argumento
@@ -310,34 +357,31 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_SEEK:
     {
-      if (!is_valid_ptr(f->esp + 4))
-        exit(-1);
-
+      if (!is_valid_ptr(f->esp + 4)) exit(-1);
       int fd = (int)VAR1;
       unsigned pos = (unsigned)VAR2;
-      if(thread_current()->DA[fd] == NULL)
-        exit(-1);
+      
+      if(thread_current()->DA[fd] == NULL) exit(-1);
 
-      file_seek(thread_current()->DA[fd],pos);
+      lock_acquire(&lock_file); // ADICIONADO
+      file_seek(thread_current()->DA[fd], pos);
+      lock_release(&lock_file); // ADICIONADO
       break;
     }
-
-    //adicionei
+    // ADD
     case SYS_TELL:
     {
-      if (!is_valid_ptr(f->esp + 4))
-        exit(-1);
-        
+      if (!is_valid_ptr(f->esp + 4)) exit(-1);
       int fd = (int)VAR1;
   
-      if(thread_current()->DA[fd] == NULL)
-        exit(-1);
+      if(thread_current()->DA[fd] == NULL) exit(-1);
 
-      f->eax =file_tell(thread_current()->DA[fd]);
+      lock_acquire(&lock_file); // ADICIONADO
+      f->eax = file_tell(thread_current()->DA[fd]);
+      lock_release(&lock_file); // ADICIONADO
       break;
     }
-
-    //adicionei
+    // ADD
     case SYS_CLOSE:
     {
       if (!is_valid_ptr(f->esp + 4))
@@ -345,13 +389,19 @@ syscall_handler (struct intr_frame *f)
 
       int fd = (int)VAR1;
   
-      if(thread_current()->DA[fd] == NULL)
+      if (fd < 3 || fd >= 128 || thread_current()->DA[fd] == NULL) 
         exit(-1);
 
+      // 2. Protege o File System
+      lock_acquire(&lock_file);
       file_close(thread_current()->DA[fd]);
+      lock_release(&lock_file);
+
+      // 3. Libera o espaço no array do processo
       thread_current()->DA[fd] = NULL;
       break;
     }
+    
 
    
     default:

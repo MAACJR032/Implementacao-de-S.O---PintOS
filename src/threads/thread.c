@@ -65,6 +65,8 @@ struct kernel_thread_frame
     void *aux;                  /* Auxiliary data for function. */
   };
 
+struct thread *get_thread_by_tid (tid_t tid);
+
 /* Statistics. */
 static long long idle_ticks;    /* # of timer ticks spent idle. */
 static long long kernel_ticks;  /* # of timer ticks in kernel threads. */
@@ -106,6 +108,21 @@ static int thread_calc_priority(struct thread *t); //funcao para calcular priori
 
    It is not safe to call thread_current() until this function
    finishes. */
+  /* Busca e retorna uma thread com base no TID. 
+   Retorna NULL se não for encontrada. */
+struct thread *
+get_thread_by_tid (tid_t tid) 
+{
+  struct list_elem *e;
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) 
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t->tid == tid)
+        return t;
+    }
+  return NULL;
+}
+
 void
 thread_init (void) 
 {
@@ -611,6 +628,8 @@ init_thread (struct thread *t, const char *name, int priority)
   memset (t, 0, sizeof *t);
   t->exit_status = 0;
   sema_init(&t->wait_sema, 0);
+  sema_init(&t->sema_load, 0);  // Inicializa o semáforo travado (0)
+  t->load_success = false;      // Por padrão, o load é falso até dar certo
   list_init(&t->children);
   t->parent = NULL; 
   t->status = THREAD_BLOCKED;

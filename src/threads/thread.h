@@ -105,8 +105,11 @@ struct thread
     struct child_status *my_status;
     struct semaphore wait_sema;        /* For parent to wait on child. */
     int exit_status;                   /* Exit status for wait/exit. */
-   tid_t parent_tid;                  /* Parent process tid. */
-   struct file* DA[128];               /*Descrtor de arquivos*/
+    tid_t parent_tid;                  /* Parent process tid. */
+    struct file* DA[128];               /*Descrtor de arquivos*/
+
+    struct semaphore sema_load;        /* Sincroniza o load do executável (Pai espera o Filho). */
+    bool load_success;                 /* Indica se o filho conseguiu abrir o arquivo. */
 #endif
 
     /* Owned by thread.c. */
@@ -162,5 +165,7 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+struct thread *get_thread_by_tid (tid_t tid);
 
 #endif /* threads/thread.h */
