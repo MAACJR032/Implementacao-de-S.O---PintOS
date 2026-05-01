@@ -8,6 +8,7 @@
 #include <syscall-nr.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/palloc.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "userprog/pagedir.h"
@@ -23,7 +24,7 @@ is_valid_ptr(const void *ptr)
         && is_user_vaddr(ptr)
         && pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
 }
-static void check_valid_string(const void *str);
+
 static void
 check_valid_string(const void *str)
 {
@@ -139,7 +140,10 @@ syscall_handler (struct intr_frame *f)
       // Valida a string byte a byte até o \0
       check_valid_string(cmd_line);
 
-      f->eax = process_execute(cmd_line);
+      lock_acquire(&lock_file);      
+      f->eax = process_execute((const char *)VAR1);
+      lock_release(&lock_file);
+
       break;
     }
     
@@ -356,11 +360,10 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_SEEK:
     {
-      if (!is_valid_ptr(f->esp + 4)) exit(-1);
+      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8))
+        exit(-1);
       int fd = (int)VAR1;
       unsigned pos = (unsigned)VAR2;
-      
-      if(thread_current()->DA[fd] == NULL) exit(-1);
 
       lock_acquire(&lock_file); // ADICIONADO
       file_seek(thread_current()->DA[fd], pos);

@@ -55,10 +55,13 @@ process_execute (const char *file_name)
   /* Extrai o primeiro token (nome do executável) */
   exec_name = strtok_r(fn_copy_exec_name, " ", &save_ptr);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(exec_name, PRI_DEFAULT, start_process, fn_copy);
+  if (filesys_open(exec_name) == NULL) {
+    return TID_ERROR;
+  }
 
-  // tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  file_close(filesys_open(exec_name)); // Fecha o arquivo para evitar vazamento, já que o load() vai abrir de novo
+
+  tid = thread_create(exec_name, PRI_DEFAULT, start_process, fn_copy);
   
   /* 1. Se a criação da thread falhou logo de cara */
   if (tid == TID_ERROR)
@@ -177,6 +180,15 @@ process_exit (void)
     cur->my_status->exit_status = cur->exit_status;
     cur->my_status->exited = true;
     sema_up(&cur->my_status->sema);
+  }
+
+  /* Libera todas as estruturas child_status dos filhos que não foram aguardados */
+  struct list_elem *e;
+  while (!list_empty(&cur->children))
+  {
+    e = list_pop_front(&cur->children);
+    struct child_status *cs = list_entry(e, struct child_status, elem);
+    palloc_free_page(cs);
   }
 
   /* Destroy the current process's page directory and switch back
@@ -319,7 +331,9 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Open executable file. */
   file = filesys_open (exec_name);
-  // file = filesys_open (file_name);
+  if (file == NULL) {
+    return TID_ERROR;
+  }
 
   if (file == NULL) 
     {
