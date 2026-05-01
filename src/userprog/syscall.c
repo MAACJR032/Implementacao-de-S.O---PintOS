@@ -132,8 +132,7 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_EXEC:
     {
-      if (!is_valid_ptr(f->esp + 4))
-        exit(-1);
+      check_valid_buffer(f->esp+4, sizeof(void*));
 
       const char *cmd_line = (const char*)VAR1;
       
