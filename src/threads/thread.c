@@ -13,6 +13,8 @@
 #include "threads/vaddr.h"
 #include "threads/float.h"
 #include "devices/timer.h"
+#include "threads/malloc.h"
+
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -292,22 +294,34 @@ thread_create (const char *name, int priority,
   init_thread (t, name, priority);
 
   tid = t->tid = allocate_tid ();
-  /* Structure to track child process status for wait/exit. */
   
+  /* Atribui o pai da thread atual */
   t->parent = thread_current();
 
-  struct child_status *cs = palloc_get_page(PAL_ZERO);
-  if (cs != NULL)
+  /* Aloca o status. Use malloc para não gastar uma página inteira de memória! */
+  struct child_status *cs = malloc(sizeof(struct child_status)); 
+  
+  if (cs == NULL)
     {
-      cs->tid = tid;
-      cs->exit_status = -1;
-      cs->exited = false;
-      cs->waited = false;
-      sema_init(&cs->sema, 0);
-      t->my_status = cs;
-      list_push_back(&thread_current()->children, &cs->elem);
+      palloc_free_page(t); /* Libera a thread alocada acima para não vazar memória */
+      return TID_ERROR;    /* Retorna erro imediatamente */
     }
 
+  /* Inicializa a struct child_status */
+  cs->tid = tid;
+  cs->exit_status = -1;
+  cs->exited = false;
+  cs->waited = false;
+  sema_init(&cs->sema, 0);
+  
+  /* Inicializa as variáveis de sincronização para o exec (Process_execute) */
+  sema_init(&cs->sema_load, 0);
+  cs->load_success = false;
+
+  /* Vincula o status à thread e adiciona na lista do processo pai */
+  t->my_status = cs;
+  list_push_back(&thread_current()->children, &cs->elem);
+  
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
@@ -328,7 +342,6 @@ thread_create (const char *name, int priority,
 
   return tid;
 }
-
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
 

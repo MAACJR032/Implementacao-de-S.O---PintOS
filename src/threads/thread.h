@@ -108,6 +108,8 @@ struct thread
     tid_t parent_tid;                  /* Parent process tid. */
     struct file* DA[128];               /*Descrtor de arquivos*/
 
+    struct file *exec_file;
+    
     struct semaphore sema_load;        /* Sincroniza o load do executável (Pai espera o Filho). */
     bool load_success;                 /* Indica se o filho conseguiu abrir o arquivo. */
 #endif
@@ -124,6 +126,10 @@ struct child_status {
   bool waited;
   struct semaphore sema;
   struct list_elem elem;
+
+  /* NOVOS CAMPOS PARA O EXEC: */
+  struct semaphore sema_load;
+  bool load_success;
 };
 
 /* If false (default), use round-robin scheduler.

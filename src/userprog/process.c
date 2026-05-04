@@ -18,6 +18,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -46,51 +47,59 @@ process_execute (const char *file_name)
   /* Segunda cópia só para extrair o nome */
   fn_copy_exec_name = palloc_get_page (0);
   if (fn_copy_exec_name == NULL)
-  {
-    palloc_free_page(fn_copy);
-    return TID_ERROR;
-  }
+    {
+      palloc_free_page(fn_copy);
+      return TID_ERROR;
+    }
   strlcpy (fn_copy_exec_name, file_name, PGSIZE);
 
   /* Extrai o primeiro token (nome do executável) */
   exec_name = strtok_r(fn_copy_exec_name, " ", &save_ptr);
 
-  if (filesys_open(exec_name) == NULL) {
-    return TID_ERROR;
-  }
-
-  file_close(filesys_open(exec_name)); // Fecha o arquivo para evitar vazamento, já que o load() vai abrir de novo
-
+  /* Cria a thread (o thread_create já copia o exec_name internamente) */
   tid = thread_create(exec_name, PRI_DEFAULT, start_process, fn_copy);
   
+  /* Agora que a thread foi criada, já podemos liberar a página auxiliar do nome */
+  palloc_free_page(fn_copy_exec_name);  
+
   /* 1. Se a criação da thread falhou logo de cara */
   if (tid == TID_ERROR)
-  {
-    palloc_free_page (fn_copy); 
-    palloc_free_page(fn_copy_exec_name);
-    return TID_ERROR;
-  }
-
-  /* 2. Sincronização: O Pai espera o Filho tentar fazer o load() */
-  struct thread *child = get_thread_by_tid(tid);
-  if (child != NULL) 
-  {
-    // O Pai dorme aqui esperando a thread filha rodar o start_process
-    sema_down(&child->sema_load); 
-
-    // O Pai acorda e verifica se o filho conseguiu abrir o arquivo no disco
-    if (!child->load_success) 
     {
-      tid = -1; // Se falhou (ex: arquivo não existe), o exec retorna -1
+      palloc_free_page (fn_copy); 
+      return TID_ERROR;
     }
-  }
 
-  /* 3. Limpa a página auxiliar usada para o nome e retorna */
-  palloc_free_page(fn_copy_exec_name);  
+  /* 2. Sincronização segura: Usar a struct child_status (que sobrevive à morte da thread) */
+  struct thread *cur = thread_current();
+  struct list_elem *e;
+  struct child_status *cs = NULL;
+
+  /* Procura o status do filho recém-criado na lista do pai */
+  for (e = list_begin(&cur->children); e != list_end(&cur->children); e = list_next(e))
+    {
+      struct child_status *temp = list_entry(e, struct child_status, elem);
+      if (temp->tid == tid)
+        {
+          cs = temp;
+          break;
+        }
+    }
+
+  /* Aguarda o filho tentar realizar o load() e verifica o sucesso */
+  if (cs != NULL) 
+    {
+      /* O Pai dorme aqui, de forma segura, no semáforo do status do filho */
+      sema_down(&cs->sema_load); 
+
+      /* O Pai acorda e verifica se o filho conseguiu carregar o executável */
+      if (!cs->load_success) 
+        {
+          return TID_ERROR; /* Se falhou, retorna -1 para o PintOS saber que deu erro */
+        }
+    }
 
   return tid;
 }
-
 /* A thread function that loads a user process and starts it
    running. */
 static void
@@ -105,23 +114,31 @@ start_process (void *file_name_)
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
+  
+  /* --- A CORREÇÃO ESTÁ AQUI: PASSANDO OS PONTEIROS SEPARADOS --- */
   success = load (file_name, &if_.eip, &if_.esp);
 
+  /* --- AVISANDO O PAI --- */
   struct thread *cur = thread_current();
-  cur->load_success = success;
-  sema_up(&cur->sema_load); // Libera o pai para continuar
+  if (cur->my_status != NULL) 
+    {
+      /* Salva se o load deu certo ou não para o pai ler */
+      cur->my_status->load_success = success;
+      
+      /* ACORDA O PAI QUE ESTÁ DORMINDO NO process_execute! */
+      sema_up(&cur->my_status->sema_load); 
+    }
+  /* ---------------------- */
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
   if (!success) 
-    thread_exit ();
+    {
+      thread_exit ();
+    }
 
   /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
+     interrupt... */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
@@ -155,12 +172,12 @@ process_wait (tid_t child_tid)
 
         cs->waited = true;
 
-        if (!cs->exited)
-          sema_down(&cs->sema);
+        sema_down(&cs->sema);
 
         int status = cs->exit_status;
         list_remove(&cs->elem);
-        palloc_free_page(cs);   /* pai libera a página */
+        //palloc_free_page(cs);   /* pai libera a página */
+        free(cs);
         return status;
       }
   }
@@ -174,25 +191,41 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
-    /* acorda o pai se ele estiver esperando */
-  if (cur->my_status != NULL)
-  {
-    cur->my_status->exit_status = cur->exit_status;
-    cur->my_status->exited = true;
-    sema_up(&cur->my_status->sema);
-  }
+  /* 1. Libera o arquivo executável do processo (evita vazar o arquivo binário) */
+  if (cur->exec_file != NULL) 
+    {
+      file_allow_write (cur->exec_file);
+      file_close (cur->exec_file);
+    }
 
-  /* Libera todas as estruturas child_status dos filhos que não foram aguardados */
+  /* 2. Fecha todos os descritores de arquivo (FDs) que ficaram abertos */
+  for (int i = 2; i < 128; i++) 
+    {
+      if (cur->DA[i] != NULL) 
+        {
+          file_close (cur->DA[i]);
+          cur->DA[i] = NULL;
+        }
+    }
+
+  /* 3. Atualiza o status e acorda o pai se ele estiver no wait() */
+  if (cur->my_status != NULL)
+    {
+      cur->my_status->exit_status = cur->exit_status;
+      cur->my_status->exited = true;
+      sema_up(&cur->my_status->sema);
+    }
+
+  /* 4. Libera a memória das estruturas child_status dos filhos que ficaram órfãos */
   struct list_elem *e;
   while (!list_empty(&cur->children))
-  {
-    e = list_pop_front(&cur->children);
-    struct child_status *cs = list_entry(e, struct child_status, elem);
-    palloc_free_page(cs);
-  }
+    {
+      e = list_pop_front(&cur->children);
+      struct child_status *cs = list_entry(e, struct child_status, elem);
+      free(cs);
+    }
 
-  /* Destroy the current process's page directory and switch back
-     to the kernel-only page directory. */
+  /* 5. Destrói o diretório de páginas do processo (Padrão do PintOS) */
   pd = cur->pagedir;
   if (pd != NULL) 
     {
@@ -208,7 +241,6 @@ process_exit (void)
       pagedir_destroy (pd);
     }
 }
-
 /* Sets up the CPU for running user code in the current
    thread.
    This function is called on every context switch. */
@@ -321,9 +353,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /* cópia só para extrair o nome */
   fn_copy_exec_name = palloc_get_page (0);
   if (fn_copy_exec_name == NULL)
-  {
-    return TID_ERROR;
-  }
+    goto done; /* Correção: Vai para done e retorna false em vez de TID_ERROR */
+
   strlcpy (fn_copy_exec_name, file_name, PGSIZE);
 
   /* Extrai o primeiro token (nome do executável) */
@@ -331,15 +362,21 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Open executable file. */
   file = filesys_open (exec_name);
-  if (file == NULL) {
-    return TID_ERROR;
-  }
+  
+  /* Correção: Já podemos liberar a página agora que o filesys_open terminou! */
+  palloc_free_page(fn_copy_exec_name);
 
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      //printf ("load: %s: open failed\n", exec_name);
       goto done; 
     }
+
+  /* --- ATUALIZAÇÃO DO EXEC_FILE AQUI --- */
+  /* Salva o arquivo na thread e impede que outros processos modifiquem ele */
+  t->exec_file = file;
+  file_deny_write (file);
+  /* ------------------------------------- */
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -350,7 +387,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024) 
     {
-      printf ("load: %s: error loading executable\n", file_name);
+      //printf ("load: %s: error loading executable\n", file_name);
       goto done; 
     }
 
@@ -414,7 +451,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp, file_name))
+  if (!setup_stack (esp, file_name)) /* CUIDADO: Aqui certifique-se que o setup_stack recebe a string inteira ou o exec_name dependendo da sua lógica */
     goto done;
 
   /* Start address. */
@@ -424,7 +461,19 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  
+  /* --- ATUALIZAÇÃO DO FECHAMENTO --- */
+  /* Só fechamos o arquivo AQUI se o carregamento FALHOU. */
+  /* Se deu sucesso, deixamos aberto para o processo usar, */
+  /* e o process_exit fará o file_close lá no final da vida dele! */
+  if (!success && file != NULL) 
+    {
+      file_allow_write (file);
+      file_close (file);
+      t->exec_file = NULL;
+    }
+  /* --------------------------------- */
+
   return success;
 }
 
