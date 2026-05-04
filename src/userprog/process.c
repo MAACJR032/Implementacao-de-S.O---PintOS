@@ -115,7 +115,6 @@ start_process (void *file_name_)
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   
-  /* --- A CORREÇÃO ESTÁ AQUI: PASSANDO OS PONTEIROS SEPARADOS --- */
   success = load (file_name, &if_.eip, &if_.esp);
 
   /* --- AVISANDO O PAI --- */
@@ -362,8 +361,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Open executable file. */
   file = filesys_open (exec_name);
-  
-  /* Correção: Já podemos liberar a página agora que o filesys_open terminou! */
   palloc_free_page(fn_copy_exec_name);
 
   if (file == NULL) 
@@ -372,7 +369,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done; 
     }
 
-  /* --- ATUALIZAÇÃO DO EXEC_FILE AQUI --- */
   /* Salva o arquivo na thread e impede que outros processos modifiquem ele */
   t->exec_file = file;
   file_deny_write (file);
@@ -451,7 +447,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp, file_name)) /* CUIDADO: Aqui certifique-se que o setup_stack recebe a string inteira ou o exec_name dependendo da sua lógica */
+  if (!setup_stack (esp, file_name)) /* Aqui certifique-se que o setup_stack recebe a string inteira ou o exec_name dependendo da sua lógica */
     goto done;
 
   /* Start address. */

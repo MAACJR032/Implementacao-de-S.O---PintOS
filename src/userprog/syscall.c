@@ -284,7 +284,7 @@ syscall_handler (struct intr_frame *f)
       void *buffer = (void *)VAR2;
       unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12));
 
-      // 3. Valida TODO o buffer de usuário (extremamente importante no read)
+      // 3. Valida TODO o buffer de usuário 
       check_valid_buffer(buffer, size);
 
       // 4. Lógica de Leitura
@@ -311,7 +311,6 @@ syscall_handler (struct intr_frame *f)
         lock_release(&lock_file);
       } 
       else {
-        // Tentar ler de stdout (fd == 1) ou fds inválidos resulta em erro
         f->eax = -1;
       }
       break;
@@ -352,7 +351,7 @@ syscall_handler (struct intr_frame *f)
         } 
         else {
             // fd 0 (stdin) ou fds inválidos
-            f->eax = -1; // ou exit(-1), dependendo da especificação do seu professor
+            f->eax = -1;
         }
         break;
     }
@@ -403,8 +402,6 @@ syscall_handler (struct intr_frame *f)
       thread_current()->DA[fd] = NULL;
       break;
     }
-    
-
    
     default:
       break;
