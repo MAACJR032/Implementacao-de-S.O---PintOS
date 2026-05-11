@@ -14,6 +14,7 @@
 #include "threads/float.h"
 #include "devices/timer.h"
 #include "threads/malloc.h"
+#include "vm/frame_table.h"
 
 #ifdef USERPROG
 #include "userprog/process.h"
@@ -130,6 +131,8 @@ thread_init (void)
 {
   ASSERT (intr_get_level () == INTR_OFF);
   lock_init (&tid_lock);
+  lock_init(&frame_table_lock);
+  list_init(&frame_table);
   list_init (&ready_list);
   list_init (&blocked_list);
   list_init (&all_list);
@@ -313,6 +316,8 @@ thread_create (const char *name, int priority,
   cs->exited = false;
   cs->waited = false;
   sema_init(&cs->sema, 0);
+
+  list_init(&t->sup_page_table);
   
   /* Inicializa as variáveis de sincronização para o exec (Process_execute) */
   sema_init(&cs->sema_load, 0);
