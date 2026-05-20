@@ -4,6 +4,8 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "vm/frame_table.h"
 #include "userprog/syscall.h"
 
 /* Number of page faults processed. */
@@ -149,19 +151,79 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-   if (user)
-   {
-      exit(-1);  // imprime exit(-1) e seta exit_status 
-   }
-  printf ("Page fault at %p: %s error %s page in %s context.\n",
-          fault_addr,
-          not_present ? "not present" : "rights violation",
-          write ? "writing" : "reading",
-          user ? "user" : "kernel");
+   /* Pega o endereço "arredondado" da página */
+   void *upage = pg_round_down (fault_addr);
 
-  kill (f);
+   /* Cso seja endereço do kernel ou o ponteriro foi NULL, é inválido */
+   if (!is_user_vaddr (fault_addr) || fault_addr == NULL)
+      {
+         printf ("Page fault at %p: %s error %s page in %s context.\n",
+                     fault_addr,
+                     not_present ? "not present" : "rights violation",
+                     write ? "writing" : "reading",
+                     user ? "user" : "kernel");
+
+         // Se é um processo acessado pelo usuário, encerra o processo. Se é um processo acessado pelo kernel, é um bug do kernel, então ocorre panic no kernel.
+         if (user)
+            exit (-1);
+         kill (f);
+         return;
+      }
+
+   /* Violação de direitos (página presente mas o acesso não é permitido) */
+   if (!not_present)
+      {
+         printf ("Page fault at %p: rights violation (%s) in %s context.\n",
+                     fault_addr,
+                     write ? "writing" : "reading",
+                     user ? "user" : "kernel");
+         if (user)
+            exit (-1);
+         kill (f);
+         return;
+      }
+
+   /* Se estiver no modo usuário e página não estiver presente, verifica se é permitido o crescimento da pilha. */
+   bool ok_to_grow = false;
+   if (user)
+      {
+         void *esp = f->esp;
+
+         if (fault_addr < PHYS_BASE && fault_addr >= esp - 32)
+            ok_to_grow = true;
+      }
+
+   /* Se não é possível alocar uma página, então mata o processo. */
+   if (!ok_to_grow)
+      {
+         if (user)
+            exit (-1);
+         kill (f);
+         return;
+      }
+
+   /* Aloca uma página do kernel (zerada) para a página de usuário em fault. */
+   uint8_t *kpage = frame_alloc (PAL_USER | PAL_ZERO);
+
+   
+   /* sem memória, logo, encerra o processo. */
+   if (kpage == NULL)
+      {
+         if (user)
+            exit (-1);
+         kill (f);
+         return;
+      }
+
+   /* Instala o novo frame na tabela de páginas */
+   if (!install_frame (upage, kpage, true))
+      {
+         /* Se não foi possível mapear, então libera frame e encerra processo. */
+         frame_free (kpage);
+
+         if (user)
+            exit (-1);
+         kill (f);
+      }
 }
 
