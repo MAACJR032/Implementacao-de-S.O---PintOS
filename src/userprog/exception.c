@@ -189,8 +189,17 @@ page_fault (struct intr_frame *f)
       {
          void *esp = f->esp;
 
-         if (fault_addr < PHYS_BASE && fault_addr >= esp - 32)
-            ok_to_grow = true;
+         /* Verifica se é um endereço de kernel
+            se é um endereço dentro de 32 bytes do ponteiro de pilha (operação de push/pusha)
+            e se é um endereço abaixo da pilha do usuário (0x08048000) */
+         if (
+             fault_addr < PHYS_BASE && 
+             (uintptr_t) fault_addr >= (uintptr_t) esp - 32 && 
+             fault_addr > (void *) 0x08048000
+         )
+            {
+               ok_to_grow = true;
+            }
       }
 
    /* Se não é possível alocar uma página, então mata o processo. */
