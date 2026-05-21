@@ -7,70 +7,95 @@
 #include "threads/malloc.h"   
 #include "threads/palloc.h"   
 #include "userprog/pagedir.h" 
-#include "frame_table.h"
+#include "vm/frame_table.h"
+#include "vm/swap.h"
+#include <string.h>
+#include "devices/timer.h"
+#include "threads/vaddr.h"
 
 struct list frame_table;
-
-
 struct lock frame_table_lock;
+
+static void *frame_evict (void);
+
 void *
 frame_alloc(enum palloc_flags flags)
 {
-    lock_acquire(&frame_table_lock);
     // chama palloc internamente 
-    uint32_t *kpage = palloc_get_page(flags);
+    void *kpage = palloc_get_page(flags);
 
-    if (kpage != NULL)
+    if (kpage == NULL) 
     {
-        /* cria e registra a entrada */
-        struct frame_table_entry *fte = malloc(sizeof(struct frame_table_entry));
-        if (fte == NULL) {
-            palloc_free_page(kpage);
-            lock_release(&frame_table_lock);
-            return NULL;
-        }
-        fte->frame = kpage;
-        fte->owner = thread_current();
-        fte->aux = NULL;
-        list_push_back(&frame_table, &fte->elem);
+      /* Se a RAM lotou, aciona o despejo */
+      kpage = frame_evict ();
+      if (kpage == NULL) return NULL;
+      
+      /* Limpa a página evictada se o flag pedir */
+      if (flags & PAL_ZERO)
+        memset (kpage, 0, PGSIZE);
     }
+
+    /* cria e registra a entrada */
+    struct frame_table_entry *fte = malloc(sizeof(struct frame_table_entry));
+    if (fte == NULL) {
+        palloc_free_page(kpage);
+        return NULL;
+    }
+
+    fte->frame = kpage;
+    fte->owner = thread_current();
+    fte->spte = NULL;
+    fte->timestamp = timer_ticks ();
+
+    lock_acquire (&frame_table_lock);
+    list_push_back(&frame_table, &fte->elem);
     lock_release(&frame_table_lock);
+
+
     return kpage;
 }
 
-bool install_frame(void *upage, void *kpage, bool writable) {
-    bool success = false;
-    struct list_elem *e;
+bool 
+install_frame(void *upage, void *kpage, bool writable) 
+{
     struct thread *t = thread_current();
-    success = (pagedir_get_page (t->pagedir, upage) == NULL
-          && pagedir_set_page (t->pagedir, upage, kpage, writable));
-    if(success) {
+    bool success = pagedir_set_page(t->pagedir, upage, kpage, writable);
+    
+    if (success) 
+    {
         lock_acquire(&frame_table_lock);
-        for (e = list_begin(&frame_table);
-            e != list_end(&frame_table);
-            e = list_next(e))
+        
+        /* 1. Criar a entrada da Tabela Suplementar (SPT) para esta página */
+        struct sup_page_table_entry *spte = malloc(sizeof(struct sup_page_table_entry));
+        if (spte == NULL) {
+            lock_release(&frame_table_lock);
+            return false;
+        }
+        
+        spte->user_vaddr = upage;
+        spte->type = PAGE_ZERO; /* Por padrão, inicializamos como zero/stack growth */
+        spte->is_loaded = true;
+        spte->file = NULL;
+        
+        /* Insere na lista de páginas suplementares da THREAD */
+        list_push_back(&t->sup_page_table, &spte->elem);
+
+        /* 2. Encontrar o frame que acabamos de alocar e fazer o vínculo bidirecional */
+        struct list_elem *e;
+        for (e = list_begin(&frame_table); e != list_end(&frame_table); e = list_next(e))
         {
             struct frame_table_entry *fte = list_entry(e, struct frame_table_entry, elem);
-            if (fte->frame == kpage && fte->owner == thread_current())
+            if (fte->frame == kpage && fte->owner == t)
             {
-                fte->aux = malloc(sizeof(struct sup_page_table_entry));
-                if(fte->aux == NULL) {
-                    lock_release(&frame_table_lock);
-                    return false;
-                }
-                fte->aux->user_addr = upage;
-                fte->aux->access_time = timer_ticks();
-                fte->aux->dirty = false;
-                fte->aux->accessed = false;
+                fte->spte = spte; /* O frame agora aponta para a SPT da thread */
                 break;
             }
-
         }
         lock_release(&frame_table_lock);
     } 
     return success;
-    
 }
+
 void
 frame_free(void *kpage)
 {
@@ -81,8 +106,7 @@ frame_free(void *kpage)
          e != list_end(&frame_table);
          e = list_next(e))
     {
-        struct frame_table_entry *fte =
-            list_entry(e, struct frame_table_entry, elem);
+        struct frame_table_entry *fte = list_entry(e, struct frame_table_entry, elem);
 
         if (fte->frame == kpage && fte->owner == thread_current())
         {
@@ -91,8 +115,10 @@ frame_free(void *kpage)
             // libera a página física 
             palloc_free_page(kpage);
             // libera as structs
-            if(fte->aux != NULL)
-                free(fte->aux);
+            if(fte->spte != NULL){
+                list_remove(&fte->spte->elem);
+                free(fte->spte);
+            }
             free(fte);
             break;
         }
@@ -100,3 +126,222 @@ frame_free(void *kpage)
     lock_release(&frame_table_lock);
 }
 
+/* Nova função auxiliar crucial para o page_fault encontrar páginas */
+struct sup_page_table_entry *
+spt_lookup(struct list *spt, void *user_vaddr) 
+{
+    struct list_elem *e;
+    for (e = list_begin(spt); e != list_end(spt); e = list_next(e)) {
+        struct sup_page_table_entry *spte = list_entry(e, struct sup_page_table_entry, elem);
+        if (spte->user_vaddr == user_vaddr) {
+            return spte;
+        }
+    }
+    return NULL;
+}
+
+bool
+load_page_from_file (struct sup_page_table_entry *spte)
+{
+    /* 1. Conseguir um frame físico na RAM */
+    uint8_t *kpage = frame_alloc (PAL_USER);
+    if (kpage == NULL)
+        return false;
+
+    /* 2. Ler os dados do arquivo de volta para o frame */
+    if (spte->read_bytes > 0) 
+    {
+        /* Sincronização: protege o acesso ao sistema de arquivos */
+        // extern struct lock lock_file; // Se o lock estiver no syscall, declare como extern
+        // lock_acquire(&lock_file);
+        
+        file_seek (spte->file, spte->file_offset);
+        if (file_read (spte->file, kpage, spte->read_bytes) != (int) spte->read_bytes) 
+        {
+            // lock_release(&lock_file);
+            frame_free (kpage);
+            return false;
+        }
+        // lock_release(&lock_file);
+    }
+    
+    /* Preenche o restante da página com zeros (se houver) */
+    memset (kpage + spte->read_bytes, 0, PGSIZE - spte->read_bytes);
+
+    /* 3. Instalar o frame mapeando no diretório de páginas do processo */
+    struct thread *t = thread_current ();
+    if (!pagedir_set_page (t->pagedir, spte->user_vaddr, kpage, spte->writable)) 
+    {
+        frame_free (kpage);
+        return false;
+    }
+
+    /* 4. Vincular o frame físico à nossa estrutura de controle global */
+    lock_acquire (&frame_table_lock);
+    struct list_elem *e;
+    for (e = list_begin (&frame_table); e != list_end (&frame_table); e = list_next (e))
+    {
+        struct frame_table_entry *fte = list_entry (e, struct frame_table_entry, elem);
+        if (fte->frame == kpage && fte->owner == t)
+        {
+            fte->spte = spte;
+            break;
+        }
+    }
+    lock_release (&frame_table_lock);
+
+    /* 5. Atualizar o estado na SPT */
+    spte->is_loaded = true;
+
+    return true;
+}
+
+void 
+spt_destroy (struct list *spt) 
+{
+    /* Varre a lista liberando estritamente a memória dos nós da SPT */
+    while (!list_empty (spt)) 
+    {
+        struct list_elem *e = list_pop_front (spt);
+        struct sup_page_table_entry *spte = list_entry (e, struct sup_page_table_entry, elem);
+
+        /* Se a página estava associada a um frame físico, precisamos apenas 
+           remover o nó de controle da tabela global, SEM dar palloc_free_page aqui! */
+        if (spte->is_loaded) 
+        {
+            lock_acquire (&frame_table_lock);
+            struct list_elem *fe;
+            for (fe = list_begin (&frame_table); fe != list_end (&frame_table); fe = list_next (fe)) 
+            {
+                struct frame_table_entry *fte = list_entry (fe, struct frame_table_entry, elem);
+                if (fte->spte == spte) 
+                {
+                    list_remove (&fte->elem);
+                    /* Removemos a estrutura de controle fte da lista global, 
+                       mas DEIXAMOS o palloc_free_page por conta do pagedir_destroy! */
+                    free (fte);
+                    break;
+                }
+            }
+            lock_release (&frame_table_lock);
+        }
+        else if (spte->type == PAGE_SWAP) 
+        {
+            swap_free (spte->swap_index); /* Libera o slot correspondente no bitmap */
+        }
+
+        /* Libera a memória do nó alocado no load_segment ou install_frame */
+        free (spte);
+    }
+}
+
+static void *
+frame_evict (void)
+{
+  lock_acquire (&frame_table_lock);
+  
+  if (list_empty (&frame_table)) 
+    {
+      lock_release (&frame_table_lock);
+      return NULL;
+    }
+
+  struct list_elem *e;
+  struct frame_table_entry *fte_to_evict = NULL;
+  int64_t oldest_tick = INT64_MAX;
+
+  /* 1. BUSCA PELA PÁGINA MAIS ANTIGA (Algoritmo FIFO/LRU por timestamp) */
+  for (e = list_begin (&frame_table); e != list_end (&frame_table); e = list_next (e))
+    {
+      struct frame_table_entry *fte = list_entry (e, struct frame_table_entry, elem);
+      
+      /* Quem tiver o menor número de ticks é o frame mais antigo na RAM */
+      if (fte->timestamp < oldest_tick)
+        {
+          oldest_tick = fte->timestamp;
+          fte_to_evict = fte;
+        }
+    }
+
+  /* Se por algum motivo bizarro não encontrou ninguém */
+  if (fte_to_evict == NULL) 
+    {
+      lock_release (&frame_table_lock);
+      return NULL;
+    }
+
+  /* 2. PREPARAÇÃO DO DESPEJO */
+  struct sup_page_table_entry *spte = fte_to_evict->spte;
+  bool is_dirty = pagedir_is_dirty (fte_to_evict->owner->pagedir, spte->user_vaddr);
+
+  /* Se for página de pilha ou página de arquivo modificada, manda para o Swap */
+  if (spte->type == PAGE_ZERO || (spte->type == PAGE_FILE && is_dirty))
+    {
+      spte->swap_index = swap_out (fte_to_evict->frame);
+      spte->type = PAGE_SWAP;
+    }
+  else if (spte->type == PAGE_FILE && !is_dirty)
+    {
+      /* Se a página de arquivo está limpa, apenas descarta. O load_page_from_file 
+         sabe reler do arquivo original se o processo precisar dela de novo */
+      spte->type = PAGE_FILE;
+    }
+
+  spte->is_loaded = false;
+  
+  /* Remove o mapeamento do hardware */
+  pagedir_clear_page (fte_to_evict->owner->pagedir, spte->user_vaddr);
+
+  /* Remove a estrutura de controle da lista global e libera a memória dela */
+  void *kpage = fte_to_evict->frame;
+  list_remove (&fte_to_evict->elem);
+  free (fte_to_evict);
+
+  lock_release (&frame_table_lock);
+  
+  return kpage; /* Retorna o frame físico limpo */
+}
+
+bool
+load_page_from_swap (struct sup_page_table_entry *spte)
+{
+  /* 1. Conseguir um frame físico na RAM (se a RAM estiver cheia, o frame_alloc chamará a evicção!) */
+  uint8_t *kpage = frame_alloc (PAL_USER);
+  if (kpage == NULL)
+    return false;
+
+  /* 2. Ler os dados do dispositivo de Swap de volta para a memória física */
+  swap_init_or_read_data:
+  swap_in (spte->swap_index, kpage);
+
+  /* 3. Instalar o frame mapeando no diretório de páginas de hardware do processo */
+  struct thread *t = thread_current ();
+  if (!pagedir_set_page (t->pagedir, spte->user_vaddr, kpage, spte->writable)) 
+    {
+      /* Se falhar no mapeamento por falta de memória do diretório, devolvemos o slot pro swap */
+      // Como o swap_in já liberou o bit no bitmap, se falhar precisamos re-alocar ou tratar.
+      // O mais seguro para evitar corrupção é dar panic ou garantir o free.
+      frame_free (kpage);
+      return false;
+    }
+
+  /* 4. Vincular o frame físico na tabela global frame_table */
+  lock_acquire (&frame_table_lock);
+  struct list_elem *e;
+  for (e = list_begin (&frame_table); e != list_end (&frame_table); e = list_next (e))
+    {
+      struct frame_table_entry *fte = list_entry (e, struct frame_table_entry, elem);
+      if (fte->frame == kpage && fte->owner == t)
+        {
+          fte->spte = spte;
+          break;
+        }
+    }
+  lock_release (&frame_table_lock);
+
+  /* 5. Atualizar os metadados da SPT */
+  spte->is_loaded = true;
+  spte->type = PAGE_ZERO; /* Opcional: marca como página regular de RAM para futuras evicções */
+
+  return true;
+}

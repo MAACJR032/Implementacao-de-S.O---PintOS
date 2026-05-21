@@ -82,6 +82,16 @@ typedef int tid_t;
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
 
+typedef int mapid_t;
+
+struct mmap_entry {
+    mapid_t mapid;                      /* ID do mapeamento */
+    struct file *file;                  /* Ponteiro do arquivo aberto via file_reopen */
+    void *vaddr_start;                  /* Endereço virtual inicial onde o arquivo foi mapeado */
+    size_t length;                      /* Tamanho total do mapeamento */
+    struct list_elem elem;              /* Elemento para a mmap_list da thread */
+};
+
 struct thread
   {
     /* Owned by thread.c. */
@@ -114,6 +124,8 @@ struct thread
     
     struct semaphore sema_load;        /* Sincroniza o load do executável (Pai espera o Filho). */
     bool load_success;                 /* Indica se o filho conseguiu abrir o arquivo. */
+    int mapid_counter;                  /* Contador para gerar IDs de mmap únicos */
+    struct list mmap_list;              /* Lista de arquivos mapeados (struct mmap_entry) */
 #endif
 
     /* Owned by thread.c. */

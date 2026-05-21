@@ -20,9 +20,23 @@ struct lock lock_file;//adicionei
 static bool
 is_valid_ptr(const void *ptr)
 {
-    return ptr != NULL
-        && is_user_vaddr(ptr)
-        && pagedir_get_page(thread_current()->pagedir, ptr) != NULL;
+    if (ptr == NULL || !is_user_vaddr(ptr)) {
+        return false;
+    }
+
+    /* Arredonda para o início da página virtual */
+    void *upage = pg_round_down(ptr);
+
+    /* Verifica se a página existe na SPT do processo */
+    struct sup_page_table_entry *spte = spt_lookup(&thread_current()->sup_page_table, upage);
+    
+    /* Se a entrada existe na SPT, o ponteiro é perfeitamente válido! 
+       (Mesmo que ainda não esteja carregado fisicamente na RAM) */
+    if (spte != NULL) {
+        return true;
+    }
+
+    return false;
 }
 
 static void
@@ -400,6 +414,29 @@ syscall_handler (struct intr_frame *f)
 
       // 3. Libera o espaço no array do processo
       thread_current()->DA[fd] = NULL;
+      break;
+    }
+
+    case SYS_MMAP:
+    {
+      if (!is_valid_ptr (f->esp + 4) || !is_valid_ptr (f->esp + 8))
+        exit (-1);
+        
+      int fd = (int) VAR1;
+      void *addr = (void *) VAR2;
+
+      f->eax = process_mmap (fd, addr);
+      break;
+    }
+
+    case SYS_MUNMAP:
+    {
+      if (!is_valid_ptr (f->esp + 4))
+        exit (-1);
+        
+      mapid_t mapping = (mapid_t) VAR1;
+      
+      process_munmap (mapping);
       break;
     }
    

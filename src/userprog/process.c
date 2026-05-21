@@ -191,6 +191,10 @@ process_exit (void)
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
+  /* Garante o munmap de todos os arquivos remanescentes */
+  process_munmap (-1);
+
+  spt_destroy (&cur->sup_page_table);
   /* 1. Libera o arquivo executável do processo (evita vazar o arquivo binário) */
   if (cur->exec_file != NULL) 
     {
@@ -545,7 +549,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
-  file_seek (file, ofs);
+  //file_seek (file, ofs);
   while (read_bytes > 0 || zero_bytes > 0) 
     {
       /* Calculate how to fill this page.
@@ -554,29 +558,27 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-      /* Get a page of memory. */
-      uint8_t *kpage = frame_alloc(PAL_USER);
-      if (kpage == NULL)
+      /* 1. Alocar a entrada da tabela suplementar (SPT) */
+      struct sup_page_table_entry *spte = malloc (sizeof (struct sup_page_table_entry));
+      if (spte == NULL)
         return false;
 
-      /* Load this page. */
-      if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
-        {
-          frame_free (kpage);
-          return false; 
-        }
-      memset (kpage + page_read_bytes, 0, page_zero_bytes);
+      /* 2. Preencher os metadados do arquivo (sem ler do disco ainda!) */
+      spte->user_vaddr = upage;
+      spte->type = PAGE_FILE;
+      spte->is_loaded = false; /* Não está na RAM */
+      spte->file = file;
+      spte->file_offset = ofs;
+      spte->read_bytes = page_read_bytes;
+      spte->writable = writable;
 
-      /* Add the page to the process's address space. */
-      if (!install_frame (upage, kpage, writable)) 
-        {
-          frame_free (kpage);
-          return false; 
-        }
+      /* 3. Inserir a página na lista da thread atual */
+      list_push_back (&thread_current ()->sup_page_table, &spte->elem);
 
-      /* Advance. */
+      /* Avançar para a próxima página */
       read_bytes -= page_read_bytes;
       zero_bytes -= page_zero_bytes;
+      ofs += page_read_bytes;
       upage += PGSIZE;
     }
   return true;
@@ -678,4 +680,142 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+
+mapid_t
+process_mmap (int fd, void *addr)
+{
+  struct thread *cur = thread_current ();
+  
+  /* Validações iniciais exigidas pelo PintOS */
+  if (addr == NULL || pg_ofs (addr) != 0 || fd < 2 || fd >= 128)
+    return -1;
+  
+  struct file *old_file = cur->DA[fd];
+  if (old_file == NULL)
+    return -1;
+
+  
+  /* Abre uma cópia independente do arquivo para uso exclusivo do mmap */
+  
+  struct file *file = file_reopen (old_file); // 
+  if (file == NULL)
+    return -1;
+
+  size_t length = file_length (file); // 
+  if (length == 0)
+    {
+      file_close (file);
+      return -1;
+    }
+
+  /* Verifica se o arquivo cabe no espaço de endereçamento do usuário sem sobreposição */
+  void *uaddr = addr;
+  size_t remaining_bytes = length;
+  while (remaining_bytes > 0)
+    {
+      if (!is_user_vaddr (uaddr) || uaddr < (void *) 0x08048000 || spt_lookup (&cur->sup_page_table, uaddr) != NULL)
+        {
+          file_close (file);
+          return -1; /* Sobrepõe segmento existente ou endereço inválido */
+        }
+      uaddr += PGSIZE;
+      remaining_bytes = remaining_bytes < PGSIZE ? 0 : remaining_bytes - PGSIZE;
+    }
+
+  /* Cria o registro do Mmap */
+  struct mmap_entry *me = malloc (sizeof (struct mmap_entry));
+  if (me == NULL)
+    {
+      file_close (file);
+      return -1;
+    }
+
+  me->mapid = cur->mapid_counter++;
+  me->file = file;
+  me->vaddr_start = addr;
+  me->length = length;
+  list_push_back (&cur->mmap_list, &me->elem);
+
+  /* Mapeia o arquivo de forma preguiçosa (Demand Paging) na SPT */
+  uaddr = addr;
+  off_t ofs = 0;
+  remaining_bytes = length;
+
+  while (remaining_bytes > 0)
+    {
+      size_t page_read_bytes = remaining_bytes < PGSIZE ? remaining_bytes : PGSIZE;
+
+      struct sup_page_table_entry *spte = malloc (sizeof (struct sup_page_table_entry));
+      if (spte == NULL)
+        return -1; // Em um cenário real deveríamos reverter, mas simplifica o fluxo de erro
+
+      spte->user_vaddr = uaddr;
+      spte->type = PAGE_FILE; /* mmap se comporta de forma parecida com carregamento de executáveis */ // [cite: 504, 505]
+      spte->is_loaded = false;
+      spte->file = file;
+      spte->file_offset = ofs;
+      spte->read_bytes = page_read_bytes;
+      spte->writable = true; /* Arquivos mapeados via mmap são sempre graváveis */
+
+      list_push_back (&cur->sup_page_table, &spte->elem); // 
+
+      ofs += page_read_bytes;
+      uaddr += PGSIZE;
+      remaining_bytes -= page_read_bytes;
+    }
+
+  return me->mapid;
+}
+
+void
+process_munmap (mapid_t mapping)
+{
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+
+  for (e = list_begin (&cur->mmap_list); e != list_end (&cur->mmap_list); e = list_next (e))
+    {
+      struct mmap_entry *me = list_entry (e, struct mmap_entry, elem);
+      if (me->mapid == mapping || mapping == -1) /* -1 serve para limpar tudo no exit */ // [cite: 473]
+        {
+          void *uaddr = me->vaddr_start;
+          size_t remaining_bytes = me->length;
+
+          /* Varre cada página que foi mapeada por este ID */
+          while (remaining_bytes > 0)
+            {
+              struct sup_page_table_entry *spte = spt_lookup (&cur->sup_page_table, uaddr);
+              if (spte != NULL)
+                {
+                  /* Se a página foi modificada na RAM, escreve de volta no arquivo original */
+                  if (spte->is_loaded && pagedir_is_dirty (cur->pagedir, uaddr))
+                    {
+                      extern struct lock lock_file;
+                      lock_acquire (&lock_file);
+                      file_write_at (me->file, uaddr, spte->read_bytes, spte->file_offset); // 
+                      lock_release (&lock_file);
+                    }
+
+                  /* Remove da SPT da thread e desmapeia do hardware */
+                  if (spte->is_loaded)
+                    {
+                      pagedir_clear_page (cur->pagedir, uaddr);
+                      // O frame físico será limpo pela tabela global ou no término da thread
+                    }
+                  list_remove (&spte->elem);
+                  free (spte); // [cite: 474]
+                }
+              uaddr += PGSIZE;
+              remaining_bytes = remaining_bytes < PGSIZE ? 0 : remaining_bytes - PGSIZE;
+            }
+
+          /* Fecha a cópia exclusiva do arquivo e libera a estrutura de mmap */
+          file_close (me->file);
+          list_remove (&me->elem);
+          free (me);
+          if (mapping != -1) return; /* Se removeu um ID específico, encerra. Se for -1, continua limpando o resto */
+        }
+    }
 }

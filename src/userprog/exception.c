@@ -183,6 +183,47 @@ page_fault (struct intr_frame *f)
          return;
       }
 
+   /* Verifica se a página já é conhecida na SPT da thread */
+   struct sup_page_table_entry *spte = spt_lookup(&thread_current()->sup_page_table, upage);
+   
+   if (spte != NULL) 
+     {
+       /* Se a página existe e NÃO está carregada na RAM... */
+       if (!spte->is_loaded) 
+         {
+           if (spte->type == PAGE_FILE) 
+             {
+               /* Traz o pedaço do executável do disco */
+               if (!load_page_from_file (spte)) {
+                   if (user) exit (-1);
+                   kill (f);
+                   return;
+               }
+               return; 
+             } 
+           else if (spte->type == PAGE_SWAP) 
+             {
+               if (!load_page_from_swap (spte)) {
+                   if (user) exit (-1);
+                   kill (f);
+                   return;
+               }
+               return; /* Resgatado com sucesso! O processo continua rodando */
+             }
+         }
+       else 
+         {
+           if (pagedir_get_page(thread_current()->pagedir, fault_addr) != NULL) 
+             {
+               return; 
+             }
+             
+           if (user) exit (-1);
+           kill (f);
+           return;
+         }
+     }
+
    /* Se estiver no modo usuário e página não estiver presente, verifica se é permitido o crescimento da pilha. */
    bool ok_to_grow = false;
    if (user)
@@ -233,6 +274,7 @@ page_fault (struct intr_frame *f)
          if (user)
             exit (-1);
          kill (f);
+         return;
       }
 }
 

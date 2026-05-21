@@ -654,6 +654,9 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->mapid_counter = 1;                 /* IDs começam em 1 */
+  list_init (&t->mmap_list);
+  
   t->magic = THREAD_MAGIC;
   if (t == initial_thread) {
     t->niceness = t->recent_cpu = 0; //declara o niceness e o recentcpu como 0
