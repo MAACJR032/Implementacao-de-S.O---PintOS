@@ -84,6 +84,7 @@ install_frame(void *upage, void *kpage, bool writable)
         spte->type = PAGE_ZERO; /* Por padrão, inicializamos como zero/stack growth */
         spte->is_loaded = true;
         spte->file = NULL;
+        spte->writable   = writable;
         
         /* Insere na lista de páginas suplementares da THREAD */
         list_push_back(&t->sup_page_table, &spte->elem);

@@ -12,6 +12,7 @@
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "userprog/pagedir.h"
+#include "vm/frame_table.h"  
 
 struct lock lock_file;//adicionei
 #define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
@@ -35,6 +36,8 @@ is_valid_ptr(const void *ptr)
     if (spte != NULL) {
         return true;
     }
+    if (pagedir_get_page(thread_current()->pagedir, upage) != NULL)
+        return true;
 
     return false;
 }
@@ -64,17 +67,27 @@ check_valid_string(const void *str)
 }
 
 static void
-check_valid_buffer (const void *buffer, unsigned size)
+check_valid_buffer (const void *buffer, unsigned size, bool writable)
 {
   char *ptr = (char *) buffer;
+
+
   for (unsigned i = 0; i < size; i++) 
   {
     if (!is_valid_ptr(ptr + i)) 
     {
       exit(-1); // Se qualquer byte do buffer for inválido, mata o processo
     }
+    if (writable) {
+      void *upage = pg_round_down(ptr + i);
+      struct sup_page_table_entry *spte = spt_lookup(&thread_current()->sup_page_table, upage);
+      if(spte && !(spte->writable)) {
+        exit(-1);
+    }
+    }
   }
 }
+
 static void syscall_handler (struct intr_frame *);
 
 void
@@ -123,7 +136,7 @@ syscall_handler (struct intr_frame *f)
     exit (-1);
   }
   // 1. Valida os 4 bytes do número da syscall
-  check_valid_buffer(f->esp, sizeof(int));
+  check_valid_buffer(f->esp, sizeof(int), false);
   int syscall_num = *(int *) f->esp;
   switch (syscall_num)
   {
@@ -148,7 +161,7 @@ syscall_handler (struct intr_frame *f)
     //adicionei
     case SYS_EXEC:
     {
-      check_valid_buffer(f->esp+4, sizeof(void*));
+      check_valid_buffer(f->esp+4, sizeof(void*), false);
 
       const char *cmd_line = (const char*)VAR1;
       
@@ -300,7 +313,7 @@ syscall_handler (struct intr_frame *f)
       unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12));
 
       // 3. Valida TODO o buffer de usuário 
-      check_valid_buffer(buffer, size);
+      check_valid_buffer(buffer, size, true);
 
       // 4. Lógica de Leitura
       if (fd == 0) {
@@ -346,7 +359,7 @@ syscall_handler (struct intr_frame *f)
         unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12)); // Criando a lógica para um "VAR3"
 
         // 3. Valida TODO o buffer, e não apenas o primeiro byte
-        check_valid_buffer(buffer, size);
+        check_valid_buffer(buffer, size, false);
 
         // 4. Lógica de Escrita
         if (fd == 1) {
