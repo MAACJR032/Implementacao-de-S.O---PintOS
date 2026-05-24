@@ -22,7 +22,7 @@ struct sup_page_table_entry {
     void* user_vaddr;
     enum page_type type;          /* Identifica a origem da página */
     bool is_loaded;               /* Indica se está na memória RAM ou não */
-
+    bool dirty;
     /* Dados para controle de arquivos (Demand Paging) */
     struct file *file;
     off_t file_offset;

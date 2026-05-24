@@ -19,42 +19,50 @@ struct lock frame_table_lock;
 static void *frame_evict (void);
 
 void *
-frame_alloc(enum palloc_flags flags)
+frame_alloc (enum palloc_flags flags)
 {
-    // chama palloc internamente 
-    void *kpage = palloc_get_page(flags);
+    /* 1. Tenta pegar uma página livre na marra */
+    void *kpage = palloc_get_page (flags);
 
+    /* 2. Se a RAM lotou, precisamos expulsar alguém */
     if (kpage == NULL) 
     {
-      /* Se a RAM lotou, aciona o despejo */
-      kpage = frame_evict ();
-      if (kpage == NULL) return NULL;
-      
-      /* Limpa a página evictada se o flag pedir */
-      if (flags & PAL_ZERO)
-        memset (kpage, 0, PGSIZE);
+        /* O frame_evict deve: 
+           - Escolher um frame 
+           - pagedir_clear_page no dono antigo
+           - Salvar no Swap/Disco se necessário
+           - REMOVER o fte antigo da lista e dar free nele
+           - Retornar o ponteiro kpage */
+        kpage = frame_evict ();
+        
+        if (kpage == NULL) return NULL;
+
+        /* Se o PAL_ZERO foi pedido, garantimos que a página expulsa seja zerada */
+        if (flags & PAL_ZERO)
+            memset (kpage, 0, PGSIZE);
     }
 
-    /* cria e registra a entrada */
-    struct frame_table_entry *fte = malloc(sizeof(struct frame_table_entry));
-    if (fte == NULL) {
-        palloc_free_page(kpage);
+    /* 3. Criar a nova entrada para o NOVO dono do frame */
+    struct frame_table_entry *fte = malloc (sizeof (struct frame_table_entry));
+    if (fte == NULL) 
+    {
+        /* Se falhar o malloc, devolvemos a página pro sistema para não vazar memória */
+        palloc_free_page (kpage);
         return NULL;
     }
 
     fte->frame = kpage;
-    fte->owner = thread_current();
-    fte->spte = NULL;
+    fte->owner = thread_current ();
+    fte->spte = NULL; // Será preenchido logo após o retorno desta função
     fte->timestamp = timer_ticks ();
 
+    /* 4. Registrar na tabela global com proteção de lock */
     lock_acquire (&frame_table_lock);
-    list_push_back(&frame_table, &fte->elem);
-    lock_release(&frame_table_lock);
-
+    list_push_back (&frame_table, &fte->elem);
+    lock_release (&frame_table_lock);
 
     return kpage;
 }
-
 bool 
 install_frame(void *upage, void *kpage, bool writable) 
 {
@@ -234,7 +242,6 @@ spt_destroy (struct list *spt)
         free (spte);
     }
 }
-
 static void *
 frame_evict (void)
 {
@@ -246,62 +253,44 @@ frame_evict (void)
       return NULL;
     }
 
-  struct list_elem *e;
+  struct list_elem *e = list_begin (&frame_table);
   struct frame_table_entry *fte_to_evict = NULL;
-  int64_t oldest_tick = INT64_MAX;
 
-  /* 1. BUSCA PELA PÁGINA MAIS ANTIGA (Algoritmo FIFO/LRU por timestamp) */
-  for (e = list_begin (&frame_table); e != list_end (&frame_table); e = list_next (e))
-    {
-      struct frame_table_entry *fte = list_entry (e, struct frame_table_entry, elem);
-      
-      /* Quem tiver o menor número de ticks é o frame mais antigo na RAM */
-      if (fte->timestamp < oldest_tick)
-        {
-          oldest_tick = fte->timestamp;
-          fte_to_evict = fte;
-        }
-    }
+  /* 1. SELEÇÃO: Usando o algoritmo do relógio (Clock) ou FIFO simples 
+     para ser mais rápido que percorrer a lista inteira buscando ticks */
+  fte_to_evict = list_entry (e, struct frame_table_entry, elem);
 
-  /* Se por algum motivo bizarro não encontrou ninguém */
-  if (fte_to_evict == NULL) 
-    {
-      lock_release (&frame_table_lock);
-      return NULL;
-    }
-
-  /* 2. PREPARAÇÃO DO DESPEJO */
+  /* 2. PREPARAÇÃO */
   struct sup_page_table_entry *spte = fte_to_evict->spte;
-  bool is_dirty = pagedir_is_dirty (fte_to_evict->owner->pagedir, spte->user_vaddr);
+  void *kpage = fte_to_evict->frame;
+  struct thread *owner = fte_to_evict->owner;
 
-  /* Se for página de pilha ou página de arquivo modificada, manda para o Swap */
-  if (spte->type == PAGE_ZERO || (spte->type == PAGE_FILE && is_dirty))
+  /* Sincroniza o bit dirty do hardware com nossa estrutura antes de limpar */
+  if (pagedir_is_dirty (owner->pagedir, spte->user_vaddr))
+      spte->dirty = true;
+
+  /* 3. LIMPEZA DE HARDWARE (Imediata) */
+  pagedir_clear_page (owner->pagedir, spte->user_vaddr);
+  spte->is_loaded = false;
+
+  /* Remove da tabela global ANTES do I/O para evitar que outra thread 
+     tente evictar o mesmo frame enquanto estamos fazendo swap */
+  list_remove (&fte_to_evict->elem);
+  lock_release (&frame_table_lock); // LIBERA O LOCK AQUI!
+
+  /* 4. OPERAÇÃO DE I/O (Fora do lock da tabela de frames) */
+  if (spte->type == PAGE_ZERO || spte->dirty)
     {
-      spte->swap_index = swap_out (fte_to_evict->frame);
+      /* Se for página de arquivo suja ou pilha, vai pro Swap */
+      spte->swap_index = swap_out (kpage);
       spte->type = PAGE_SWAP;
     }
-  else if (spte->type == PAGE_FILE && !is_dirty)
-    {
-      /* Se a página de arquivo está limpa, apenas descarta. O load_page_from_file 
-         sabe reler do arquivo original se o processo precisar dela de novo */
-      spte->type = PAGE_FILE;
-    }
-
-  spte->is_loaded = false;
   
-  /* Remove o mapeamento do hardware */
-  pagedir_clear_page (fte_to_evict->owner->pagedir, spte->user_vaddr);
-
-  /* Remove a estrutura de controle da lista global e libera a memória dela */
-  void *kpage = fte_to_evict->frame;
-  list_remove (&fte_to_evict->elem);
+  /* Libera a estrutura de controle */
   free (fte_to_evict);
 
-  lock_release (&frame_table_lock);
-  
-  return kpage; /* Retorna o frame físico limpo */
+  return kpage; 
 }
-
 bool
 load_page_from_swap (struct sup_page_table_entry *spte)
 {
