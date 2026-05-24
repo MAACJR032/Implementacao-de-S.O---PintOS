@@ -143,29 +143,29 @@ spt_lookup(struct list *spt, void *user_vaddr)
 bool
 load_page_from_file (struct sup_page_table_entry *spte)
 {
-    /* 1. Conseguir um frame físico na RAM */
     uint8_t *kpage = frame_alloc (PAL_USER);
-    if (kpage == NULL)
-        return false;
+    if (kpage == NULL) return false;
 
-    /* 2. Ler os dados do arquivo de volta para o frame */
     if (spte->read_bytes > 0) 
     {
-        /* Sincronização: protege o acesso ao sistema de arquivos */
-        // extern struct lock lock_file; // Se o lock estiver no syscall, declare como extern
-        // lock_acquire(&lock_file);
+        extern struct lock lock_file;
+        
+        /* Uso correto e nativo do PintOS para Smart Locking */
+        bool locked_by_me = lock_held_by_current_thread(&lock_file);
+        
+        if (!locked_by_me) lock_acquire(&lock_file);
         
         file_seek (spte->file, spte->file_offset);
         if (file_read (spte->file, kpage, spte->read_bytes) != (int) spte->read_bytes) 
         {
-            // lock_release(&lock_file);
+            if (!locked_by_me) lock_release(&lock_file);
             frame_free (kpage);
             return false;
         }
-        // lock_release(&lock_file);
+        
+        if (!locked_by_me) lock_release(&lock_file);
     }
     
-    /* Preenche o restante da página com zeros (se houver) */
     memset (kpage + spte->read_bytes, 0, PGSIZE - spte->read_bytes);
 
     /* 3. Instalar o frame mapeando no diretório de páginas do processo */
@@ -305,22 +305,18 @@ frame_evict (void)
 bool
 load_page_from_swap (struct sup_page_table_entry *spte)
 {
-  /* 1. Conseguir um frame físico na RAM (se a RAM estiver cheia, o frame_alloc chamará a evicção!) */
+  /* 1. Conseguir um frame físico na RAM */
   uint8_t *kpage = frame_alloc (PAL_USER);
   if (kpage == NULL)
     return false;
 
   /* 2. Ler os dados do dispositivo de Swap de volta para a memória física */
-  swap_init_or_read_data:
   swap_in (spte->swap_index, kpage);
 
   /* 3. Instalar o frame mapeando no diretório de páginas de hardware do processo */
   struct thread *t = thread_current ();
   if (!pagedir_set_page (t->pagedir, spte->user_vaddr, kpage, spte->writable)) 
     {
-      /* Se falhar no mapeamento por falta de memória do diretório, devolvemos o slot pro swap */
-      // Como o swap_in já liberou o bit no bitmap, se falhar precisamos re-alocar ou tratar.
-      // O mais seguro para evitar corrupção é dar panic ou garantir o free.
       frame_free (kpage);
       return false;
     }
@@ -341,7 +337,10 @@ load_page_from_swap (struct sup_page_table_entry *spte)
 
   /* 5. Atualizar os metadados da SPT */
   spte->is_loaded = true;
-  spte->type = PAGE_ZERO; /* Opcional: marca como página regular de RAM para futuras evicções */
+  
+  /* IMPORTANTE: NÃO mude o type para PAGE_ZERO aqui! 
+     Se a memória encher de novo, o evictor precisa saber que esta página 
+     é do tipo SWAP para poder mandá-la de volta pro disco corretamente. */
 
   return true;
 }

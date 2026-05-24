@@ -117,6 +117,7 @@ int write(int fd, const void *buffer, unsigned size)
 static void
 syscall_handler (struct intr_frame *f) 
 {
+  thread_current()->user_esp = f->esp;
   if (f == NULL)
   {
     exit (-1);
@@ -323,6 +324,7 @@ syscall_handler (struct intr_frame *f)
         lock_acquire(&lock_file);
         f->eax = file_read(f_ptr, buffer, size);
         lock_release(&lock_file);
+        break;
       } 
       else {
         f->eax = -1;
@@ -362,6 +364,7 @@ syscall_handler (struct intr_frame *f)
             lock_acquire(&lock_file);
             f->eax = file_write(f_ptr, buffer, size);
             lock_release(&lock_file);
+            break;
         } 
         else {
             // fd 0 (stdin) ou fds inválidos

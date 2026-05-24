@@ -768,17 +768,21 @@ process_mmap (int fd, void *addr)
 
   return me->mapid;
 }
-
 void
 process_munmap (mapid_t mapping)
 {
   struct thread *cur = thread_current ();
-  struct list_elem *e;
+  struct list_elem *e = list_begin (&cur->mmap_list);
 
-  for (e = list_begin (&cur->mmap_list); e != list_end (&cur->mmap_list); e = list_next (e))
+  /* CORREÇÃO AQUI: Usamos um while e salvamos o "next" ANTES de deletar o atual */
+  while (e != list_end (&cur->mmap_list))
     {
       struct mmap_entry *me = list_entry (e, struct mmap_entry, elem);
-      if (me->mapid == mapping || mapping == -1) /* -1 serve para limpar tudo no exit */ // [cite: 473]
+      
+      /* Salva o ponteiro para o próximo elemento de forma segura */
+      struct list_elem *next_e = list_next (e); 
+
+      if (me->mapid == mapping || mapping == -1) /* -1 serve para limpar tudo no exit */
         {
           void *uaddr = me->vaddr_start;
           size_t remaining_bytes = me->length;
@@ -794,7 +798,7 @@ process_munmap (mapid_t mapping)
                     {
                       extern struct lock lock_file;
                       lock_acquire (&lock_file);
-                      file_write_at (me->file, uaddr, spte->read_bytes, spte->file_offset); // 
+                      file_write_at (me->file, uaddr, spte->read_bytes, spte->file_offset);
                       lock_release (&lock_file);
                     }
 
@@ -802,10 +806,9 @@ process_munmap (mapid_t mapping)
                   if (spte->is_loaded)
                     {
                       pagedir_clear_page (cur->pagedir, uaddr);
-                      // O frame físico será limpo pela tabela global ou no término da thread
                     }
                   list_remove (&spte->elem);
-                  free (spte); // [cite: 474]
+                  free (spte);
                 }
               uaddr += PGSIZE;
               remaining_bytes = remaining_bytes < PGSIZE ? 0 : remaining_bytes - PGSIZE;
@@ -815,7 +818,11 @@ process_munmap (mapid_t mapping)
           file_close (me->file);
           list_remove (&me->elem);
           free (me);
-          if (mapping != -1) return; /* Se removeu um ID específico, encerra. Se for -1, continua limpando o resto */
+          
+          if (mapping != -1) return; /* Se removeu um ID específico, encerra. */
         }
+      
+      /* Avança para o próximo elemento da lista usando o ponteiro seguro salvo lá em cima */
+      e = next_e;
     }
 }

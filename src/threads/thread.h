@@ -104,7 +104,7 @@ struct thread
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
     struct list sup_page_table;
-
+    void *user_esp;
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 

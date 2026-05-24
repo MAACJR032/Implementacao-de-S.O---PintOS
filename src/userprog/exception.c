@@ -7,6 +7,7 @@
 #include "threads/vaddr.h"
 #include "vm/frame_table.h"
 #include "userprog/syscall.h"
+#include "threads/malloc.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -125,156 +126,108 @@ kill (struct intr_frame *f)
 static void
 page_fault (struct intr_frame *f) 
 {
-  bool not_present;  /* True: not-present page, false: writing r/o page. */
-  bool write;        /* True: access was write, false: access was read. */
-  bool user;         /* True: access by user, false: access by kernel. */
-  void *fault_addr;  /* Fault address. */
+  bool not_present;
+  bool write;
+  bool user;
+  void *fault_addr;
 
-  /* Obtain faulting address, the virtual address that was
-     accessed to cause the fault.  It may point to code or to
-     data.  It is not necessarily the address of the instruction
-     that caused the fault (that's f->eip).
-     See [IA32-v2a] "MOV--Move to/from Control Registers" and
-     [IA32-v3a] 5.15 "Interrupt 14--Page Fault Exception
-     (#PF)". */
   asm ("movl %%cr2, %0" : "=r" (fault_addr));
-
-  /* Turn interrupts back on (they were only off so that we could
-     be assured of reading CR2 before it changed). */
   intr_enable ();
-
-  /* Count page faults. */
   page_fault_cnt++;
 
-  /* Determine cause. */
   not_present = (f->error_code & PF_P) == 0;
-  write = (f->error_code & PF_W) != 0;
+  write = (f->error_code & PF_W) != 0; /* VOLTAMOS COM O WRITE AQUI */
   user = (f->error_code & PF_U) != 0;
 
-   /* Pega o endereço "arredondado" da página */
-   void *upage = pg_round_down (fault_addr);
+  /* 1. Validação do Endereço: Se for ponteiro do Kernel, aí sim é Kernel Panic */
+  if (fault_addr == NULL || !is_user_vaddr (fault_addr))
+    {
+      if (user) exit (-1);
+      kill (f); 
+      return;
+    }
 
-   /* Cso seja endereço do kernel ou o ponteriro foi NULL, é inválido */
-   if (!is_user_vaddr (fault_addr) || fault_addr == NULL)
-      {
-         printf ("Page fault at %p: %s error %s page in %s context.\n",
-                     fault_addr,
-                     not_present ? "not present" : "rights violation",
-                     write ? "writing" : "reading",
-                     user ? "user" : "kernel");
+  /* =========================================================================
+     A MÁGICA DE ESTABILIDADE: A partir daqui, sabemos que o erro ocorreu no 
+     espaço do usuário. Portanto, se não conseguirmos resolver o Page Fault, 
+     SEMPRE chamamos exit(-1) em vez de kill(f). Isso salva o Kernel!
+     ========================================================================= */
 
-         // Se é um processo acessado pelo usuário, encerra o processo. Se é um processo acessado pelo kernel, é um bug do kernel, então ocorre panic no kernel.
-         if (user)
-            exit (-1);
-         kill (f);
-         return;
-      }
+  void *upage = pg_round_down (fault_addr);
 
-   /* Violação de direitos (página presente mas o acesso não é permitido) */
-   if (!not_present)
-      {
-         printf ("Page fault at %p: rights violation (%s) in %s context.\n",
-                     fault_addr,
-                     write ? "writing" : "reading",
-                     user ? "user" : "kernel");
-         if (user)
-            exit (-1);
-         kill (f);
-         return;
-      }
+  /* 2. Violação de direitos estrutural (Hardware bloqueou) */
+  if (!not_present)
+    {
+      exit (-1);
+    }
 
-   /* Verifica se a página já é conhecida na SPT da thread */
-   struct sup_page_table_entry *spte = spt_lookup(&thread_current()->sup_page_table, upage);
+  /* 3. Busca na Tabela Suplementar (SPT) */
+  struct sup_page_table_entry *spte = spt_lookup(&thread_current()->sup_page_table, upage);
    
-   if (spte != NULL) 
-     {
-       /* Se a página existe e NÃO está carregada na RAM... */
-       if (!spte->is_loaded) 
-         {
-           if (spte->type == PAGE_FILE) 
-             {
-               /* Traz o pedaço do executável do disco */
-               if (!load_page_from_file (spte)) {
-                   if (user) exit (-1);
-                   kill (f);
-                   return;
-               }
-               return; 
-             } 
-           else if (spte->type == PAGE_SWAP) 
-             {
-               if (!load_page_from_swap (spte)) {
-                   if (user) exit (-1);
-                   kill (f);
-                   return;
-               }
-               return; /* Resgatado com sucesso! O processo continua rodando */
-             }
-         }
-       else 
-         {
-           if (pagedir_get_page(thread_current()->pagedir, fault_addr) != NULL) 
-             {
-               return; 
-             }
-             
-           if (user) exit (-1);
-           kill (f);
-           return;
-         }
-     }
+  if (spte != NULL) 
+    {
+      /* CORREÇÃO PT-WRITE-CODE2: Tentou escrever numa página Somente Leitura! */
+      if (write && !spte->writable) 
+        {
+          exit (-1);
+        }
 
-   /* Se estiver no modo usuário e página não estiver presente, verifica se é permitido o crescimento da pilha. */
-   bool ok_to_grow = false;
-   if (user)
-      {
-         void *esp = f->esp;
-
-         /* Verifica se é um endereço de kernel
-            se é um endereço dentro de 32 bytes do ponteiro de pilha (operação de push/pusha)
-            e se é um endereço abaixo da pilha do usuário (0x08048000) */
-         if (
-             fault_addr < PHYS_BASE && 
-             (uintptr_t) fault_addr >= (uintptr_t) esp - 32 && 
-             fault_addr > (void *) 0x08048000
-         )
+      if (!spte->is_loaded) 
+        {
+          if (spte->type == PAGE_FILE) 
             {
-               ok_to_grow = true;
+              if (!load_page_from_file (spte)) exit (-1);
+              return; 
+            } 
+          else if (spte->type == PAGE_SWAP) 
+            {
+              if (!load_page_from_swap (spte)) exit (-1);
+              return; 
             }
-      }
+        }
+      else 
+        {
+          exit (-1);
+        }
+    }
 
-   /* Se não é possível alocar uma página, então mata o processo. */
-   if (!ok_to_grow)
-      {
-         if (user)
-            exit (-1);
-         kill (f);
-         return;
-      }
+  /* 4. Lógica de Crescimento de Pilha */
+  bool ok_to_grow = false;
+  void *esp = user ? f->esp : thread_current()->user_esp;
+  if (esp == NULL) esp = (void *) 0xc0000000;
 
-   /* Aloca uma página do kernel (zerada) para a página de usuário em fault. */
-   uint8_t *kpage = frame_alloc (PAL_USER | PAL_ZERO);
+  if (fault_addr >= (esp - 32) && fault_addr >= (void *)(0xc0000000 - 8 * 1024 * 1024))
+    {
+      ok_to_grow = true;
+    }
 
-   
-   /* sem memória, logo, encerra o processo. */
-   if (kpage == NULL)
-      {
-         if (user)
-            exit (-1);
-         kill (f);
-         return;
-      }
+  if (!ok_to_grow)
+    {
+      exit (-1);
+    }
 
-   /* Instala o novo frame na tabela de páginas */
-   if (!install_frame (upage, kpage, true))
-      {
-         /* Se não foi possível mapear, então libera frame e encerra processo. */
-         frame_free (kpage);
+  /* 5. Alocação e mapeamento da nova página de pilha */
+  uint8_t *kpage = frame_alloc (PAL_USER | PAL_ZERO);
+  if (kpage == NULL) exit (-1);
 
-         if (user)
-            exit (-1);
-         kill (f);
-         return;
-      }
+  if (!install_frame (upage, kpage, true))
+    {
+      frame_free (kpage);
+      exit (-1);
+    }
+
+  struct sup_page_table_entry *new_spte = malloc(sizeof(struct sup_page_table_entry));
+  if (new_spte != NULL)
+    {
+      new_spte->user_vaddr = upage;
+      new_spte->type = PAGE_SWAP; 
+      new_spte->writable = true;
+      new_spte->is_loaded = true;
+      list_push_back(&thread_current()->sup_page_table, &new_spte->elem);
+    }
+  else
+    {
+      frame_free(kpage);
+      exit (-1);
+    }
 }
-
