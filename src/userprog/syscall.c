@@ -14,6 +14,7 @@
 #include "userprog/pagedir.h"
 #include "vm/frame_table.h"  
 
+
 struct lock lock_file;//adicionei
 #define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
 #define VAR2 (*(uint32_t *)(f->esp + 8)) //Variavel "coringa2" (ADICIONEI)
@@ -301,49 +302,48 @@ syscall_handler (struct intr_frame *f)
 
     // ADD
     case SYS_READ:
-    {
-      // 1. Valida se os endereços dos três argumentos na pilha são válidos
-      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8) || !is_valid_ptr(f->esp + 12)) {
-        exit(-1);
-      }
+  {
+      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8) || !is_valid_ptr(f->esp + 12))
+          exit(-1);
 
-      // 2. Extrai os argumentos da pilha
-      int fd = (int)VAR1;
-      void *buffer = (void *)VAR2;
-      unsigned size = (unsigned)(*(uint32_t *)(f->esp + 12));
+      int fd       = (int)VAR1;
+      void *buffer = (void*)VAR2;
+      unsigned size = (unsigned)(*(uint32_t*)(f->esp + 12));
 
-      // 3. Valida TODO o buffer de usuário 
       check_valid_buffer(buffer, size, true);
 
-      // 4. Lógica de Leitura
-      if (fd == 0) {
-        // Lê do teclado (stdin) usando input_getc()
-        uint8_t *buf = (uint8_t *)buffer;
-        for (unsigned i = 0; i < size; i++) {
-          buf[i] = input_getc();
-        }
-        f->eax = size;
-      } 
-      else if (fd >= 3 && fd < 128) {
-        // Obtém o arquivo da tabela de descritores do processo
-        struct file *f_ptr = thread_current()->DA[fd];
-        
-        // Se o arquivo não estiver aberto, encerra o processo
-        if (f_ptr == NULL) {
-          exit(-1);
-        }
+      //força carregamento de todas as páginas do buffer antes de adquirir lock_file
+      if (size > 0)
+      {
+          char *ptr = (char *)buffer;
+          for (unsigned i = 0; i < size; i += PGSIZE)
+              (void)(*(volatile char *)(ptr + i));  
+          (void)(*(volatile char *)(ptr + size - 1)); 
+      }
 
-        // Adquire o lock, lê com file_read e libera o lock
-        lock_acquire(&lock_file);
-        f->eax = file_read(f_ptr, buffer, size);
-        lock_release(&lock_file);
-        break;
-      } 
-      else {
-        f->eax = -1;
+      if (fd == 0)
+      {
+          uint8_t *buf = (uint8_t *)buffer;
+          for (unsigned i = 0; i < size; i++)
+              buf[i] = input_getc();
+          f->eax = size;
+      }
+      else if (fd >= 3 && fd < 128)
+      {
+          struct file *f_ptr = thread_current()->DA[fd];
+          if (f_ptr == NULL) exit(-1);
+
+          lock_acquire(&lock_file);
+          f->eax = file_read(f_ptr, buffer, size);
+          lock_release(&lock_file);
+          break;
+      }
+      else
+      {
+          f->eax = -1;
       }
       break;
-    }
+  }
     
     // ADD
     case SYS_WRITE:

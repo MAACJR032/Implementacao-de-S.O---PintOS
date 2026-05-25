@@ -12,7 +12,6 @@
 #include <string.h>
 #include "devices/timer.h"
 #include "threads/vaddr.h"
-
 struct list frame_table;
 struct lock frame_table_lock;
 
@@ -159,7 +158,7 @@ load_page_from_file (struct sup_page_table_entry *spte)
     {
         extern struct lock lock_file;
         
-        /* Uso correto e nativo do PintOS para Smart Locking */
+        
         bool locked_by_me = lock_held_by_current_thread(&lock_file);
         
         if (!locked_by_me) lock_acquire(&lock_file);
@@ -253,7 +252,7 @@ frame_evict (void)
       lock_release (&frame_table_lock);
       return NULL;
     }
-
+  
   struct list_elem *e = list_begin (&frame_table);
   struct frame_table_entry *fte_to_evict = NULL;
 
