@@ -769,60 +769,79 @@ process_mmap (int fd, void *addr)
   return me->mapid;
 }
 void
-process_munmap (mapid_t mapping)
+process_munmap(mapid_t mapping)
 {
-  struct thread *cur = thread_current ();
-  struct list_elem *e = list_begin (&cur->mmap_list);
+    struct thread *cur = thread_current();
+    struct list_elem *e = list_begin(&cur->mmap_list);
 
-  /* CORREÇÃO AQUI: Usamos um while e salvamos o "next" ANTES de deletar o atual */
-  while (e != list_end (&cur->mmap_list))
+    while (e != list_end(&cur->mmap_list))
     {
-      struct mmap_entry *me = list_entry (e, struct mmap_entry, elem);
-      
-      /* Salva o ponteiro para o próximo elemento de forma segura */
-      struct list_elem *next_e = list_next (e); 
+        struct mmap_entry *me = list_entry(e, struct mmap_entry, elem);
+        struct list_elem *next_e = list_next(e);
 
-      if (me->mapid == mapping || mapping == -1) /* -1 serve para limpar tudo no exit */
+        if (me->mapid == mapping || mapping == -1)
         {
-          void *uaddr = me->vaddr_start;
-          size_t remaining_bytes = me->length;
+            void *uaddr = me->vaddr_start;
+            size_t remaining_bytes = me->length;
 
-          /* Varre cada página que foi mapeada por este ID */
-          while (remaining_bytes > 0)
+            while (remaining_bytes > 0)
             {
-              struct sup_page_table_entry *spte = spt_lookup (&cur->sup_page_table, uaddr);
-              if (spte != NULL)
+                struct sup_page_table_entry *spte =
+                    spt_lookup(&cur->sup_page_table, uaddr);
+
+                if (spte != NULL)
                 {
-                  /* Se a página foi modificada na RAM, escreve de volta no arquivo original */
-                  if (spte->is_loaded && pagedir_is_dirty (cur->pagedir, uaddr))
+                    /* escreve de volta se modificada */
+                    if (spte->is_loaded && pagedir_is_dirty(cur->pagedir, uaddr))
                     {
-                      extern struct lock lock_file;
-                      lock_acquire (&lock_file);
-                      file_write_at (me->file, uaddr, spte->read_bytes, spte->file_offset);
-                      lock_release (&lock_file);
+                        extern struct lock lock_file;
+                        lock_acquire(&lock_file);
+                        file_write_at(me->file, uaddr,
+                                      spte->read_bytes,
+                                      spte->file_offset);
+                        lock_release(&lock_file);
                     }
 
-                  /* Remove da SPT da thread e desmapeia do hardware */
-                  if (spte->is_loaded)
+                    /* Remove da SPT da thread e desmapeia do hardware */
+                    if (spte->is_loaded)
                     {
-                      pagedir_clear_page (cur->pagedir, uaddr);
+                        pagedir_clear_page(cur->pagedir, uaddr);
+                        // libera a página física 
+                        lock_acquire(&frame_table_lock);
+                        struct list_elem *fe;
+                        for (fe = list_begin(&frame_table);
+                             fe != list_end(&frame_table);
+                             fe = list_next(fe))
+                        {
+                            struct frame_table_entry *fte =
+                                list_entry(fe, struct frame_table_entry, elem);
+                            if (fte->spte == spte)
+                            {
+                                list_remove(&fte->elem);
+                                palloc_free_page(fte->frame);
+                                free(fte);
+                                break;
+                            }
+                        }
+                        lock_release(&frame_table_lock);
                     }
-                  list_remove (&spte->elem);
-                  free (spte);
+
+                    // remove da SPT em todos os casos
+                    list_remove(&spte->elem);
+                    free(spte);
                 }
-              uaddr += PGSIZE;
-              remaining_bytes = remaining_bytes < PGSIZE ? 0 : remaining_bytes - PGSIZE;
-            }
 
-          /* Fecha a cópia exclusiva do arquivo e libera a estrutura de mmap */
-          file_close (me->file);
-          list_remove (&me->elem);
-          free (me);
-          
-          if (mapping != -1) return; /* Se removeu um ID específico, encerra. */
+                uaddr += PGSIZE;
+                remaining_bytes = remaining_bytes < PGSIZE ? 0 : remaining_bytes - PGSIZE;
+            }
+            /* Fecha a cópia exclusiva do arquivo e libera a estrutura de mmap */
+            file_close(me->file);
+            list_remove(&me->elem);
+            free(me);
+
+            if (mapping != -1) return;/* Se removeu um ID específico, encerra. */
         }
-      
-      /* Avança para o próximo elemento da lista usando o ponteiro seguro salvo lá em cima */
-      e = next_e;
+        /* Avança para o próximo elemento da lista usando o ponteiro seguro salvo lá em cima */
+        e = next_e;
     }
 }
