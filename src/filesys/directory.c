@@ -5,6 +5,7 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "threads/thread.h"
 
 /* A directory. */
 struct dir 
@@ -26,7 +27,7 @@ struct dir_entry
 bool
 dir_create (block_sector_t sector, size_t entry_cnt)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  return inode_create (sector, entry_cnt * sizeof (struct dir_entry),true);
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -123,6 +124,21 @@ dir_lookup (const struct dir *dir, const char *name,
 
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
+
+  if (strcmp (name, ".") == 0)
+    {
+      *inode = inode_reopen (dir_get_inode (dir));
+      return true;
+    }
+
+  /* Se o nome for ".." e estivermos no diretório raiz,
+     retornamos um novo ponteiro para o próprio inode da raiz.
+     No Pintos, o diretório raiz fica fixo no setor ROOT_DIR_SECTOR (geralmente setor 1). */
+  if (strcmp (name, "..") == 0 && inode_get_inumber (dir_get_inode (dir)) == ROOT_DIR_SECTOR) 
+    {
+      *inode = inode_reopen (dir_get_inode (dir));
+      return true;
+    }
 
   if (lookup (dir, name, &e, NULL))
     *inode = inode_open (e.inode_sector);
@@ -233,4 +249,169 @@ dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
         } 
     }
   return false;
+}
+
+/* Analisa um PATH absoluto ou relativo.
+   Retorna o 'struct dir *' correspondente ao diretório pai do alvo
+   e copia o nome do arquivo/diretório final para 'file_name'.
+   Retorna NULL em caso de falha. */
+struct dir *
+path_resolve (const char *path, char *file_name)
+{
+  if (path == NULL || file_name == NULL || strlen(path) == 0)
+    return NULL;
+
+  struct dir *dir_atual;
+
+  /* 1. Determina o ponto de partida (Absoluto vs Relativo) */
+  if (path[0] == '/') 
+    {
+      dir_atual = dir_open_root (); /* Começa na Raiz */
+    } 
+  else 
+    {
+      if (thread_current()->cwd != NULL)
+        dir_atual = dir_reopen (thread_current()->cwd); /* Começa no CWD */
+      else
+        dir_atual = dir_open_root ();
+    }
+
+  /* Se o ponto de partida foi removido, a resolução deve falhar imediatamente */
+  if (inode_is_removed (dir_get_inode (dir_atual))) 
+    {
+      dir_close (dir_atual);
+      return NULL;
+    }
+
+  /* Fazemos uma cópia do path original porque strtok_r modifica a string */
+  char *path_copy = malloc (strlen (path) + 1);
+  if (path_copy == NULL) 
+    {
+      dir_close (dir_atual);
+      return NULL;
+    }
+  strlcpy (path_copy, path, strlen (path) + 1);
+
+  char *token, *save_ptr;
+  char *next_token = strtok_r (path_copy, "/", &save_ptr);
+  token = next_token;
+
+  /* Se o caminho era apenas "/", tratamos como diretório raiz com nome vazio */
+  if (token == NULL) 
+    {
+      file_name[0] = '\0';
+      free (path_copy);
+      return dir_atual;
+    }
+
+  /* Avança para obter o próximo token adiantado */
+  next_token = strtok_r (NULL, "/", &save_ptr);
+
+  /* Loop de navegação pelos subdiretórios intermédios */
+  while (next_token != NULL) 
+    {
+      if (strlen (token) > NAME_MAX) 
+        {
+          dir_close (dir_atual);
+          free (path_copy);
+          return NULL;
+        }
+
+      struct inode *next_inode = NULL;
+
+      /* Tratamento dos componentes especiais '.' e '..' */
+      if (strcmp (token, ".") == 0) 
+        {
+          /* Mantém-se no mesmo diretório */
+          next_inode = inode_reopen (dir_get_inode (dir_atual));
+        } 
+      else if (strcmp (token, "..") == 0) 
+        {
+          /* Busca pelo Inode Pai. Nota: Vocês precisarão garantir que o dir_lookup
+             ou o próprio inode de um diretório guarde uma entrada especial ".." */
+          if (!dir_lookup (dir_atual, "..", &next_inode)) 
+            {
+              dir_close (dir_atual);
+              free (path_copy);
+              return NULL; /* Falha ao subir nível */
+            }
+        } 
+      else 
+        {
+          /* Procura normal por subdiretório */
+          if (!dir_lookup (dir_atual, token, &next_inode)) 
+            {
+              dir_close (dir_atual);
+              free (path_copy);
+              return NULL; /* Subdiretório não encontrado */
+            }
+        }
+
+      /*Garante que o inode encontrado é realmente de um diretório e não foi removido */
+      if (!inode_is_dir (next_inode) || inode_is_removed (next_inode)) 
+        {
+          inode_close (next_inode);
+          dir_close (dir_atual);
+          free (path_copy);
+          return NULL; /* Corta a operação se tentar usar arquivo como se fosse pasta */
+        }
+
+      dir_close (dir_atual);
+      dir_atual = dir_open (next_inode);
+      
+      token = next_token;
+      next_token = strtok_r (NULL, "/", &save_ptr);
+    }
+
+  /* O último token restante é o nome do arquivo/diretório final */
+  if (strlen (token) > NAME_MAX) 
+    {
+      dir_close (dir_atual);
+      free (path_copy);
+      return NULL;
+    }
+  strlcpy (file_name, token, NAME_MAX + 1);
+
+  free (path_copy);
+  return dir_atual;
+}
+
+/* Retorna true se o diretório estiver vazio (apenas contendo "." e ".."), 
+   ou false caso contrário. */
+bool
+dir_is_empty (struct dir *dir) 
+{
+  char name[NAME_MAX + 1];
+  block_sector_t inode_sector;
+  
+  /* Reinicia o ponteiro de leitura do diretório */
+  dir_seek (dir, 0); 
+  
+  /* Varre todas as entradas internas */
+  while (dir_readdir (dir, name)) 
+    {
+      /* Se encontrar qualquer entrada que não seja "." ou "..", o diretório não está vazio */
+      if (strcmp (name, ".") != 0 && strcmp (name, "..") != 0) 
+        {
+          return false;
+        }
+    }
+  return true;
+}
+
+/* Define a posição de leitura atual no diretório para POS. */
+void
+dir_seek (struct dir *dir, off_t pos) 
+{
+  ASSERT (dir != NULL);
+  ASSERT (pos >= 0);
+  dir->pos = pos;
+}
+
+/* Retorna a posição de leitura atual no diretório. */
+off_t
+dir_tell (struct dir *dir) 
+{
+  ASSERT (dir != NULL);
+  return dir->pos;
 }

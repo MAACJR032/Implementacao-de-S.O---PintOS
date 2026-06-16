@@ -6,9 +6,12 @@
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
 #include "filesys/directory.h"
+#include "filesys/cache.h"
+#include "threads/thread.h"
 
 /* Partition that contains the file system. */
 struct block *fs_device;
+extern bool filesys_initialized;
 
 static void do_format (void);
 
@@ -23,11 +26,19 @@ filesys_init (bool format)
 
   inode_init ();
   free_map_init ();
+  cache_init ();
 
   if (format) 
     do_format ();
 
   free_map_open ();
+
+  /* Garante que a thread atual do Kernel (main) ganhe acesso à raiz 
+     durante a montagem do disco nas fases de extração/persistência */
+  if (filesys_initialized && thread_current() != NULL)
+    {
+      thread_current()->cwd = dir_open_root ();
+    }
 }
 
 /* Shuts down the file system module, writing any unwritten data
@@ -36,6 +47,7 @@ void
 filesys_done (void) 
 {
   free_map_close ();
+  cache_flush (fs_device);
 }
 
 /* Creates a file named NAME with the given INITIAL_SIZE.
@@ -45,12 +57,13 @@ filesys_done (void)
 bool
 filesys_create (const char *name, off_t initial_size) 
 {
+  char file_name[NAME_MAX + 1];
+  struct dir *dir = path_resolve (name, file_name);
   block_sector_t inode_sector = 0;
-  struct dir *dir = dir_open_root ();
   bool success = (dir != NULL
                   && free_map_allocate (1, &inode_sector)
-                  && inode_create (inode_sector, initial_size)
-                  && dir_add (dir, name, inode_sector));
+                  && inode_create (inode_sector, initial_size,false)
+                  && dir_add (dir, file_name, inode_sector)); 
   if (!success && inode_sector != 0) 
     free_map_release (inode_sector, 1);
   dir_close (dir);
@@ -66,11 +79,17 @@ filesys_create (const char *name, off_t initial_size)
 struct file *
 filesys_open (const char *name)
 {
-  struct dir *dir = dir_open_root ();
+  char file_name[NAME_MAX + 1];
+  struct dir *dir = path_resolve (name, file_name);
   struct inode *inode = NULL;
 
-  if (dir != NULL)
-    dir_lookup (dir, name, &inode);
+  if (dir != NULL) 
+    {
+      if (strlen (file_name) == 0) /* Abriu a própria raiz '/' */
+        inode = inode_reopen (dir_get_inode (dir));
+      else
+        dir_lookup (dir, file_name, &inode);
+    }
   dir_close (dir);
 
   return file_open (inode);
@@ -83,8 +102,9 @@ filesys_open (const char *name)
 bool
 filesys_remove (const char *name) 
 {
-  struct dir *dir = dir_open_root ();
-  bool success = dir != NULL && dir_remove (dir, name);
+  char file_name[NAME_MAX + 1];
+  struct dir *dir = path_resolve (name, file_name);
+  bool success = dir != NULL && dir_remove (dir, file_name);
   dir_close (dir); 
 
   return success;

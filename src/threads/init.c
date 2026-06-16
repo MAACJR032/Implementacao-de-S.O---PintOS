@@ -22,6 +22,7 @@
 #include "threads/palloc.h"
 #include "threads/pte.h"
 #include "threads/thread.h"
+#include "filesys/directory.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #include "userprog/exception.h"
@@ -53,7 +54,7 @@ static const char *scratch_bdev_name;
 static const char *swap_bdev_name;
 #endif
 #endif /* FILESYS */
-
+extern bool filesys_initialized;
 /* -ul: Maximum number of pages to put into palloc's user pool. */
 static size_t user_page_limit = SIZE_MAX;
 
@@ -125,6 +126,8 @@ main (void)
   ide_init ();
   locate_block_devices ();
   filesys_init (format_filesys);
+  filesys_initialized = true;
+  thread_current()->cwd = dir_open_root();
 #endif
 
   printf ("Boot complete.\n");

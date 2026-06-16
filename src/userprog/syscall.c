@@ -12,6 +12,9 @@
 #include "filesys/file.h"
 #include "filesys/filesys.h"
 #include "userprog/pagedir.h"
+#include "filesys/inode.h"
+#include "filesys/directory.h"
+#include "filesys/free-map.h"
 
 struct lock lock_file;//adicionei
 #define VAR1 (*(uint32_t *)(f->esp + 4)) //Variavel "coringa" (ADICIONEI)
@@ -185,20 +188,56 @@ syscall_handler (struct intr_frame *f)
         exit(-1);
 
       const char* file = (const char*)VAR1;
-
-      // Valida a string inteira do nome do arquivo!
       check_valid_string(file);
       
-      // Valida se a string em si está em memória válida
-      if (!is_valid_ptr(file)) {
+      if (!is_valid_ptr(file))
         exit(-1);
-      }
       
-      // Protege o File System com o seu Lock!
       lock_acquire(&lock_file);
-      f->eax = filesys_remove(file);
-      lock_release(&lock_file);
+      
+      bool success = false;
+      
+      /*Abre o arquivo/diretório temporariamente para inspecionar o Inode */
+      struct file *target_file = filesys_open(file);
+      if (target_file != NULL) 
+        {
+          struct inode *inode = file_get_inode(target_file);
+          
+          if (inode != NULL && inode_is_dir(inode)) 
+            {
+              /* REFINAMENTO: Se for um diretório */
+              struct dir *dir = dir_open(inode_reopen(inode));
+              
+              /* Regra 1: Não pode remover o diretório raiz (setor ROOT_DIR_SECTOR)
+                 Regra 2: O diretório precisa estar vazio */
+              if (inode_get_inumber(inode) != ROOT_DIR_SECTOR && dir_is_empty(dir)) 
+                {
+                  file_close(target_file);
+                  success = filesys_remove(file);
+                }
+              else 
+                {
+                  /* Falha se tentar apagar a raiz ou se a pasta tiver arquivos */
+                  success = false; 
+                  file_close(target_file);
+                }
+              dir_close(dir);
+            }
+          else 
+            {
+              /* Se for um arquivo comum, fecha o ponteiro temporário e remove normalmente */
+              file_close(target_file);
+              success = filesys_remove(file);
+            }
+        }
+      else 
+        {
+          /* Arquivo nem sequer existia */
+          success = false; 
+        }
 
+      f->eax = success;
+      lock_release(&lock_file);
       break;
     }
     
@@ -221,14 +260,17 @@ syscall_handler (struct intr_frame *f)
       int resultado = -1;
 
       if(file_open){
+        struct inode *inode = file_get_inode(file_open);
+
         for(int i = 3;i<128;i++){
           if(!thread_current()->DA[i]){
-            if(!strcmp(thread_current()->name,file_name)){
+            if (!strcmp(thread_current()->name, file_name) && 
+                (inode != NULL && !inode_is_dir(inode))) {
               file_deny_write(file_open);
             }
-          thread_current()->DA[i] = file_open;
-          resultado=i;
-          break;
+            thread_current()->DA[i] = file_open;
+            resultado=i;
+            break;
           }
         }
 
@@ -305,10 +347,13 @@ syscall_handler (struct intr_frame *f)
           exit(-1);
         }
 
-        // Adquire o lock, lê com file_read e libera o lock
-        lock_acquire(&lock_file);
+        struct inode *inode = file_get_inode (f_ptr);
+        if (inode != NULL && inode_is_dir (inode)) {
+          f->eax = -1;
+          break;
+        }
+
         f->eax = file_read(f_ptr, buffer, size);
-        lock_release(&lock_file);
       } 
       else {
         // Tentar ler de stdout (fd == 1) ou fds inválidos resulta em erro
@@ -346,9 +391,13 @@ syscall_handler (struct intr_frame *f)
                 exit(-1);
             }
             
-            lock_acquire(&lock_file);
+            struct inode *inode = file_get_inode (f_ptr);
+            if (inode != NULL && inode_is_dir (inode)) {
+                f->eax = -1;
+                break;
+            }
+
             f->eax = file_write(f_ptr, buffer, size);
-            lock_release(&lock_file);
         } 
         else {
             // fd 0 (stdin) ou fds inválidos
@@ -403,8 +452,180 @@ syscall_handler (struct intr_frame *f)
       thread_current()->DA[fd] = NULL;
       break;
     }
-    
 
+    case SYS_INUMBER:
+    {
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      int fd = (int)VAR1;
+      if (fd < 3 || fd >= 128 || thread_current()->DA[fd] == NULL) 
+        {
+          f->eax = -1;
+          break;
+        }
+
+      lock_acquire(&lock_file);
+      struct inode *inode = file_get_inode(thread_current()->DA[fd]);
+      if (inode != NULL)
+        f->eax = inode_get_inumber(inode);
+      else
+        f->eax = -1;
+      lock_release(&lock_file);
+      break;
+    }
+
+    case SYS_CHDIR:
+    {
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      const char *path = (const char *)VAR1;
+      check_valid_string(path);
+
+      lock_acquire(&lock_file);
+      
+      /* Tenta abrir o diretório especificado pelo caminho */
+      struct file *dir_file = filesys_open(path);
+      struct inode *inode = dir_file ? file_get_inode(dir_file) : NULL;
+
+      if (inode != NULL && inode_is_dir(inode)) 
+        {
+          /* Fecha o diretório antigo e abre o novo */
+          dir_close(thread_current()->cwd);
+          thread_current()->cwd = dir_open(inode_reopen(inode));
+          f->eax = true;
+        } 
+      else 
+        {
+          f->eax = false;
+        }
+
+      if (dir_file)
+        file_close(dir_file);
+
+      lock_release(&lock_file);
+      break;
+    }
+    
+    case SYS_MKDIR:
+    {
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      const char *path = (const char *)VAR1;
+      check_valid_string(path);
+
+      char file_name[NAME_MAX + 1];
+      lock_acquire(&lock_file);
+      
+      struct dir *parent_dir = path_resolve(path, file_name);
+      block_sector_t inode_sector = 0;
+      bool success = false;
+
+      if (parent_dir != NULL && strlen(file_name) > 0) 
+        {
+          /* 1. Aloca o setor no free_map e cria o diretório com a flag true (is_dir) */
+          if (free_map_allocate(1, &inode_sector) && dir_create(inode_sector, 16)) 
+            {
+              /* 2. Adiciona o novo subdiretório no diretório pai */
+              if (dir_add(parent_dir, file_name, inode_sector)) 
+                {
+                  /* 3. Abre o diretório recém-criado para gravar as entradas especiais . e .. */
+                  struct dir *new_dir = dir_open(inode_open(inode_sector));
+                  if (new_dir != NULL) 
+                    {
+                      /* . aponta para ele mesmo (inode_sector) */
+                      /* .. aponta para o pai (obtido através do inode do pai) */
+                      block_sector_t parent_sector = inode_get_inumber(dir_get_inode(parent_dir));
+                      
+                      dir_add(new_dir, ".", inode_sector);
+                      dir_add(new_dir, "..", parent_sector);
+                      dir_close(new_dir);
+                      success = true;
+                    }
+                }
+              
+              /* Se algo falhou no meio do caminho, libera o setor para não haver vazamento */
+              if (!success)
+                free_map_release(inode_sector, 1);
+            }
+        }
+
+      if (parent_dir)
+        dir_close(parent_dir);
+
+      f->eax = success;
+      lock_release(&lock_file);
+      break;
+    }
+
+    case SYS_ISDIR:
+    {
+      if (!is_valid_ptr(f->esp + 4))
+        exit(-1);
+
+      int fd = (int)VAR1;
+      if (fd < 3 || fd >= 128 || thread_current()->DA[fd] == NULL) 
+        {
+          f->eax = false;
+          break;
+        }
+
+      lock_acquire(&lock_file);
+      struct inode *inode = file_get_inode(thread_current()->DA[fd]);
+      f->eax = (inode != NULL && inode_is_dir(inode));
+      lock_release(&lock_file);
+      break;
+    }
+
+    case SYS_READDIR:
+    {
+      if (!is_valid_ptr(f->esp + 4) || !is_valid_ptr(f->esp + 8))
+        exit(-1);
+
+      int fd = (int)VAR1;
+      char *name_buffer = (char *)VAR2;
+
+      if (fd < 3 || fd >= 128 || thread_current()->DA[fd] == NULL) 
+        {
+          f->eax = false;
+          break;
+        }
+
+      lock_acquire(&lock_file);
+      struct file *file_ptr = thread_current()->DA[fd];
+      struct inode *inode = file_get_inode(file_ptr);
+      
+      bool success = false;
+      if (inode != NULL && inode_is_dir(inode)) 
+        {
+          /* 1. Abre a representação de diretório */
+          struct dir *dir = dir_open(inode_reopen(inode));
+          if (dir != NULL) 
+            {
+              /* 2. Recupera o offset de leitura armazenado na struct file do processo */
+              dir_seek(dir, file_tell(file_ptr));
+              
+              /* 3. Tenta ler o próximo registro do diretório */
+              success = dir_readdir(dir, name_buffer);
+              
+              /* Ignora as entradas especiais "." e ".." para não listá-las ao usuário, se os testes exigirem */
+              while (success && (strcmp(name_buffer, ".") == 0 || strcmp(name_buffer, "..") == 0)) {
+                  success = dir_readdir(dir, name_buffer);
+              }
+
+              /* 4. Atualiza o offset de leitura de volta na struct file */
+              file_seek(file_ptr, dir_tell(dir));
+              
+              dir_close(dir);
+            }
+        }
+
+      f->eax = success;
+      lock_release(&lock_file);
+      break;
+    }
    
     default:
       break;

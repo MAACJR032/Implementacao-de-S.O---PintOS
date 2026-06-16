@@ -14,6 +14,7 @@
 #include "threads/float.h"
 #include "devices/timer.h"
 #include "threads/malloc.h"
+#include "filesys/directory.h"
 
 #ifdef USERPROG
 #include "userprog/process.h"
@@ -82,6 +83,7 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs = 0;
+bool filesys_initialized = false;
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -142,6 +144,10 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  if (filesys_initialized)
+    thread_current()->cwd = dir_open_root();
+  else
+    thread_current()->cwd = NULL;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -455,16 +461,23 @@ void
 thread_exit (void) 
 {
   ASSERT (!intr_context ());
+  struct thread *cur = thread_current();
 
 #ifdef USERPROG
   process_exit ();
 #endif
 
+if (cur->cwd != NULL) 
+    {
+      dir_close (cur->cwd);
+      cur->cwd = NULL; /* Boa prática: evita ponteiro solto */
+    }
+
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
-  list_remove (&thread_current()->allelem);
+  list_remove (&cur->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -657,6 +670,11 @@ init_thread (struct thread *t, const char *name, int priority)
     t->recent_cpu = thread_current()->recent_cpu; // Herda o recent_cpu do pai
   }
   if (thread_mlfqs) thread_calc_priority(t); //calcula a prioridade da thread se o escalonador for o mlfqs
+
+  if (filesys_initialized && thread_current()->cwd != NULL)
+    t->cwd = dir_reopen (thread_current()->cwd);
+  else
+    t->cwd = NULL;
 
   old_level = intr_disable();
   list_push_back (&all_list, &t->allelem);
